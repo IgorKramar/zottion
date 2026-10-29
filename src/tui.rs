@@ -182,6 +182,7 @@ struct Ui {
     status: String,
     pending: usize,
     saving: bool,
+    quit_after_save: bool,
     drafts: HashSet<String>,
     local_text: std::collections::HashMap<String, String>,
     local_checks: std::collections::HashMap<String, bool>,
@@ -217,6 +218,7 @@ impl Ui {
             status: "Ctrl+P — найти страницу или действие".into(),
             pending: 0,
             saving: false,
+            quit_after_save: false,
             drafts,
             local_text: std::collections::HashMap::new(),
             local_checks: std::collections::HashMap::new(),
@@ -475,6 +477,7 @@ impl Ui {
             Err(error) => {
                 if message.write {
                     self.saving = false;
+                    self.quit_after_save = false;
                 }
                 for node in &mut self.nodes {
                     if !node.loaded {
@@ -621,6 +624,8 @@ impl Ui {
                 error,
             }) => {
                 self.saving = false;
+                let quit = quit || self.quit_after_save;
+                self.quit_after_save = false;
                 for (id, value) in results {
                     if !offline {
                         self.drafts.remove(&id);
@@ -654,6 +659,10 @@ impl Ui {
             }
             Ok(Payload::Mutation { value, generation }) => {
                 self.saving = false;
+                if self.quit_after_save {
+                    self.quit_after_save = false;
+                    self.quit = true;
+                }
                 if let Some(id) = value["draft_id"].as_str() {
                     self.drafts.insert(id.into());
                 }
@@ -1585,6 +1594,12 @@ impl Ui {
             }
         }
         if self.saving {
+            if let Event::Key(key) = &event
+                && key.code == KeyCode::Char('q')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                self.quit_after_save = true;
+            }
             return Ok(());
         }
         if let Event::Key(key) = &event
@@ -2367,7 +2382,9 @@ fn draw(frame: &mut Frame, ui: &mut Ui, offline: bool) {
         } else {
             "Просмотр"
         });
-    let message = if ui.saving {
+    let message = if ui.quit_after_save {
+        "Выход после завершения отправки…"
+    } else if ui.saving {
         "Отправка; дождитесь подтверждения…"
     } else if ui.pending > 0 {
         "Загрузка…"
@@ -3548,12 +3565,6 @@ mod tests {
         )
         .await
         .unwrap();
-        let message = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        ui.receive(&app, message).await.unwrap();
-        assert!(!ui.saving);
         ui.event(
             &app,
             &tx,
@@ -3561,6 +3572,13 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(!ui.quit && ui.quit_after_save);
+        let message = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        ui.receive(&app, message).await.unwrap();
+        assert!(!ui.saving);
         assert!(ui.quit);
         let path = "blocks/c02fc1d3-db8b-45c5-a222-27595b15aea7";
         assert!(
@@ -3608,6 +3626,14 @@ mod tests {
             "Не терять"
         );
         assert!(app.store.operations().await.unwrap().is_empty());
+        ui.saving = true;
+        ui.quit_after_save = true;
+        ui.accept(Message {
+            generation: None,
+            write: true,
+            result: Err(Error::new(6, "Сбой отправки")),
+        });
+        assert!(!ui.quit && !ui.saving && !ui.quit_after_save);
     }
     #[test]
     fn narrow_unicode_protected_content_and_stale_results() {

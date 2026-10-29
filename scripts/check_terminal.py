@@ -74,9 +74,7 @@ with tempfile.TemporaryDirectory(prefix="zottion-pty-") as directory:
                 drain(0.2)
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
                 os.kill(child.pid, signal.SIGWINCH)
-                os.write(master, b"\x13")
-                drain(0.3)
-                os.write(master, b"\x11")
+                os.write(master, b"\x13\x11")
             deadline = time.monotonic() + 5
             while child.poll() is None and time.monotonic() < deadline:
                 drain(0.1)
