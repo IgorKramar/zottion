@@ -86,4 +86,28 @@ fn cli_stdin_json_drafts_profiles_and_exit_codes() {
         .unwrap();
     assert_eq!(result.status.code(), Some(2));
     assert!(serde_json::from_slice::<Value>(&result.stderr).is_ok());
+    let mut child = command(&dir)
+        .env_remove("NOTION_TOKEN")
+        .args(["auth", "login", "--token-stdin", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let invalid_token = "sensitive-invalid-token second-token";
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(invalid_token.as_bytes())
+        .unwrap();
+    let result = child.wait_with_output().unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    assert!(result.stdout.is_empty());
+    let error = String::from_utf8(result.stderr).unwrap();
+    assert!(!error.contains(invalid_token));
+    assert_eq!(
+        serde_json::from_str::<Value>(&error).unwrap()["error"]["code"],
+        2
+    );
 }

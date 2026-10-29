@@ -6,7 +6,7 @@
 
 | Группа | Команды |
 |---|---|
-| auth | login --server URL [--no-browser], status, refresh, logout [--revoke] |
+| auth | login --token-stdin или login --server URL [--no-browser], status, refresh, logout [--revoke] |
 | page | get [--content], create --parent ID или --data-source ID, title, move --parent ID, trash --yes, restore, favorite, pin, recent |
 | page property | get --property ID [--all], set --property NAME_OR_ID --value-json JSON или --file FILE |
 | block | get, children, update --text/--file/--patch-file, append --kind TYPE --text/--file или --blocks-file, format, check --checked true/false, trash, restore, move (явный код 7) |
@@ -25,6 +25,16 @@ paragraph. `block update --file` принимает текст одного бл
 `--file -`, а также `--patch-file -` и другие файловые параметры читают stdin.
 Текст должен быть UTF-8, максимальный вход — 10 MiB. Один поток stdin нельзя
 использовать сразу для двух файлов одного запроса.
+
+`auth login --token-stdin` читает до 8192 байт UTF-8 из pipe, проверяет API-токен
+через `/users/me` и сохраняет в Secret Service/Keychain. Прямой ввод с отображением
+в терминале отклоняется. Используйте скрытый запрос и pipe из
+[README](../README.ru.md#авторизация). Перед импортом уберите `NOTION_TOKEN`:
+переменная окружения имеет приоритет над сохранёнными учётными данными.
+Для API-токена `--workspace` задаёт локальную метку области хранения; для OAuth
+он должен совпадать с ID workspace в ответе Notion. `--profile` изолирует оба вида.
+API-токен обновляют/отзывают в Notion; `auth refresh` и `logout --revoke`
+для него возвращают код 7, сохраняя локальную запись. Обычный `logout` её удаляет.
 
 Списки имеют `--cursor` и `--all` (view query создаёт запрос, поэтому для него
 курсор содержится в результате, а `--all` дочитывает тот же серверный query ID).

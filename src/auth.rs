@@ -51,6 +51,7 @@ struct Workspace {
 #[derive(Serialize, Deserialize)]
 struct Credential {
     access_token: String,
+    // Empty OAuth fields identify an internal API token; never refresh/revoke it via a server.
     refresh_token: String,
     workspace_id: String,
     bot_id: String,
@@ -370,7 +371,7 @@ pub async fn resolve(options: &Options) -> Result<Resolved> {
                 Workspace {
                     identity: credential.identity.clone(),
                     last_identity: Some(credential.identity.clone()),
-                    server: Some(credential.server.clone()),
+                    server: (!credential.server.is_empty()).then(|| credential.server.clone()),
                     keyring: true,
                 },
             )
@@ -390,6 +391,16 @@ pub async fn resolve(options: &Options) -> Result<Resolved> {
         state_dir: paths.state_dir,
     })
 }
+async fn ensure_keyring() -> Result<()> {
+    tokio::task::spawn_blocking(|| {
+        Entry::store_status()
+            .as_ref()
+            .map(|_| ())
+            .map_err(|_| keyring_error())
+    })
+    .await
+    .map_err(|_| keyring_error())?
+}
 pub async fn login(options: &Options, server: &str, no_browser: bool) -> Result<Value> {
     validate(options)?;
     if options.offline {
@@ -404,14 +415,7 @@ pub async fn login(options: &Options, server: &str, no_browser: bool) -> Result<
     )
     .await?;
     // Initialize keyring before receiving tokens; never substitute a plaintext file.
-    tokio::task::spawn_blocking(|| {
-        Entry::store_status()
-            .as_ref()
-            .map(|_| ())
-            .map_err(|_| keyring_error())
-    })
-    .await
-    .map_err(|_| keyring_error())??;
+    ensure_keyring().await?;
     let client = http(options.timeout)?;
     let verifier = random();
     let challenge = fingerprint(&verifier);
@@ -498,6 +502,78 @@ pub async fn login(options: &Options, server: &str, no_browser: bool) -> Result<
         );
     }
 }
+pub async fn login_token(options: &Options, token: String) -> Result<Value> {
+    validate(options)?;
+    if options.offline {
+        return Err(Error::input("Вход недоступен с --offline"));
+    }
+    if env_token().is_some() {
+        return Err(Error::input(
+            "Уберите NOTION_TOKEN из окружения перед сохранением API-токена в keychain",
+        ));
+    }
+    let too_long = token.len() > 8192;
+    let token = token.trim();
+    if too_long || token.is_empty() || !token.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(Error::input(
+            "Ожидается один непустой API-токен длиной до 8192 байт",
+        ));
+    }
+    ensure_keyring().await?;
+    let user = crate::notion::Client::new(token.to_owned(), options.timeout)?
+        .get("users/me")
+        .await?;
+    let bot_id = user["id"]
+        .as_str()
+        .filter(|id| !id.is_empty() && user["type"] == "bot")
+        .ok_or_else(|| Error::new(3, "Notion не подтвердил API-токен connection"))?;
+    let paths = paths()?;
+    let _lock = lock(
+        paths
+            .state_dir
+            .join(format!("auth-{}.lock", fingerprint(&options.profile))),
+    )
+    .await?;
+    let config = read_config(&paths.config)?;
+    let workspace = workspace(&config, options);
+    let identity = fingerprint(token);
+    save_credential(
+        options.profile.clone(),
+        workspace.clone(),
+        Credential {
+            access_token: token.to_owned(),
+            refresh_token: String::new(),
+            workspace_id: workspace.clone(),
+            bot_id: bot_id.to_owned(),
+            identity: identity.clone(),
+            server: String::new(),
+        },
+    )
+    .await?;
+    remember(
+        &paths.config,
+        &options.profile,
+        &workspace,
+        Workspace {
+            identity: identity.clone(),
+            last_identity: Some(identity),
+            server: None,
+            keyring: true,
+        },
+    )
+    .await?;
+    Ok(
+        json!({"logged_in":true,"verified":true,"profile":options.profile,"workspace":workspace,"storage":"system_keyring","auth_type":"api_token"}),
+    )
+}
+fn oauth_server(credential: &Credential) -> Result<Url> {
+    if credential.server.is_empty() {
+        return Err(Error::unsupported(
+            "API-токен обновляется и отзывается в Notion; новый токен сохраните через auth login --token-stdin",
+        ));
+    }
+    server_url(&credential.server)
+}
 fn credential(raw: Value, server: &str, prior: Option<&Credential>) -> Result<Credential> {
     let access = raw["access_token"]
         .as_str()
@@ -581,7 +657,7 @@ pub async fn refresh(options: &Options) -> Result<Value> {
     let prior = load_credential(options.profile.clone(), workspace.clone())
         .await?
         .ok_or_else(|| Error::new(3, "Выполните auth login"))?;
-    let server = server_url(&prior.server)?;
+    let server = oauth_server(&prior)?;
     let raw = response_json(
         http(options.timeout)?
             .post(server.join("refresh").unwrap())
@@ -633,7 +709,7 @@ pub async fn logout(options: &Options, revoke: bool) -> Result<Value> {
             let prior = load_credential(options.profile.clone(), workspace.clone())
                 .await?
                 .ok_or_else(|| Error::new(3, "Запись токенов отсутствует"))?;
-            let server = server_url(&prior.server)?;
+            let server = oauth_server(&prior)?;
             response_json(
                 http(options.timeout)?
                     .post(server.join("revoke").unwrap())
@@ -732,5 +808,44 @@ mod tests {
         assert!(server_url("http://evil.test").is_err());
         assert!(server_url("https://user:secret@auth.example.com").is_err());
         assert!(server_url("http://127.0.0.1:9393").is_ok());
+        let api_token = Credential {
+            access_token: "synthetic-api-token".into(),
+            refresh_token: String::new(),
+            workspace_id: "workspace".into(),
+            bot_id: "bot".into(),
+            identity: fingerprint("synthetic-api-token"),
+            server: String::new(),
+        };
+        let loaded: Credential =
+            serde_json::from_str(&serde_json::to_string(&api_token).unwrap()).unwrap();
+        assert_eq!(loaded.identity, fingerprint("synthetic-api-token"));
+        assert_eq!(oauth_server(&loaded).unwrap_err().code, 7);
+        assert!(oauth_server(&prior).is_ok());
+    }
+    #[tokio::test]
+    async fn api_token_login_rejects_offline_and_malformed_input_before_keychain() {
+        let mut options = Options {
+            profile: "default".into(),
+            workspace: None,
+            offline: true,
+            timeout: Duration::from_secs(1),
+        };
+        assert_eq!(
+            login_token(&options, "synthetic".into())
+                .await
+                .unwrap_err()
+                .code,
+            2
+        );
+        options.offline = false;
+        for token in [
+            String::new(),
+            "two tokens".into(),
+            "token\nsecond".into(),
+            "x".repeat(8193),
+            format!("x{}", " ".repeat(8192)),
+        ] {
+            assert_eq!(login_token(&options, token).await.unwrap_err().code, 2);
+        }
     }
 }

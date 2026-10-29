@@ -55,7 +55,7 @@ a custom terminal ANSI palette. No Notion connection was used.*
 | Views & search | Read existing views; search Notion titles or locally loaded content |
 | Local state | Scoped SQLite cache, FTS5 search, durable drafts and an operation journal |
 | Automation | Versioned JSON, stdin, cursors, profiles, exit codes and shell completion |
-| Authentication | Browser OAuth through a self-hosted service; token pairs in the OS keychain |
+| Authentication | API token or browser OAuth through a self-hosted service; OS keychain storage |
 
 Unknown blocks are displayed and protected. Files, comments, schema editing and
 other view layouts are outside v0.1. See the [capability matrix](docs/capabilities.md).
@@ -89,8 +89,52 @@ are optional. Set `NO_COLOR` to disable colors. Themes are `default`, `dark` and
 
 ## Quick start
 
+Choose one of three authentication paths. **An API token saved in the OS keychain
+is the simplest option for your own workspace.** There is no hosted zottion OAuth
+service yet; a Notion page or workspace URL cannot be used as `--server`.
+
+### API token: save once
+
+1. Open [Notion connections](https://app.notion.com/developers/connections), create
+   a connection named `zottion`, and choose **API token**. Select your workspace
+   and enable **Read content**, **Update content** and **Insert content**.
+2. In **Content access → Edit access**, select the pages zottion should access
+   and save. You can also use a page's **••• → Connections → Add connections**.
+   Child pages inherit access. Copy the token from **Configuration**.
+3. Run these commands in Bash and paste the token into the hidden prompt:
+
+```bash
+unset NOTION_TOKEN
+read -rsp 'Notion API token: ' zottion_token
+printf '\n'
+printf '%s' "$zottion_token" | zottion auth login --token-stdin
+unset zottion_token
+zottion auth status --json
+```
+
+`verified: true` confirms a request to Notion succeeded. The token is saved in
+Secret Service/Keychain and is available in new terminals. No OAuth service is
+needed. `zottion auth logout` removes the local credential; rotate or revoke an
+API token in Notion, then import a replacement with `--token-stdin`.
+`auth refresh` and `auth logout --revoke` apply to OAuth credentials.
+
+### Environment token: temporary or CI
+
+```bash
+read -rsp 'Notion API token: ' NOTION_TOKEN
+printf '\n'
+export NOTION_TOKEN
+zottion auth status --json
+```
+
+This does not save the token. It lasts for the current shell and takes precedence
+over keychain credentials. Use `unset NOTION_TOKEN` to return to the saved login.
+Never put the token in a command argument, shell startup file or committed file.
+
+### Browser OAuth: self-hosted
+
 Browser login needs a configured zottion OAuth service and a registered Notion
-public connection. There is no bundled production login service.
+OAuth connection. `--server` is the **root URL of that service**.
 
 ```sh
 zottion --timeout 300 auth login --server https://YOUR_AUTH_HOST
@@ -98,10 +142,19 @@ zottion auth status --json
 zottion open PAGE_ID_OR_NOTION_URL
 ```
 
-See [self-hosted OAuth](docs/oauth.md) for the server setup. For development and
-CI, set `NOTION_TOKEN` in the environment. It takes precedence over keychain
-credentials; tokens are not accepted in command arguments or stored in config files.
-Your connection must have access to the pages you use.
+See [self-hosted OAuth](docs/oauth.md) for the server setup, callback and token
+rotation. OAuth tokens are saved in the OS keychain too. Your connection must
+have access to the pages you use.
+
+After either login path:
+
+```sh
+zottion search Home --json
+zottion open PAGE_ID_OR_NOTION_URL
+```
+
+Use a link copied from an actual page, not a workspace profile URL. If search is
+empty or a page returns 404, check its connection access in Notion.
 
 ### Notes
 

@@ -1,6 +1,11 @@
 # Собственный OAuth-сервис
 
 Автор: Igor Kramar. Один экземпляр `zottion-auth-service`, Axum/Tokio.
+Это вариант браузерного OAuth для владельца своего сервиса. Для личного
+workspace можно обойтись без сервиса: `auth login --token-stdin` сохраняет
+API-токен в системном keychain. Все три пути описаны в
+[README](../README.ru.md#авторизация).
+
 Нужна зарегистрированная public connection Notion с фиксированным callback
 `https://YOUR_AUTH_HOST/callback`. Production-домен, сертификат и размещение
 настраиваются отдельно.

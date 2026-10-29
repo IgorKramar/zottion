@@ -61,8 +61,54 @@ cd zottion
 cargo install --path . --locked
 ```
 
-Без подкоманды TUI запускается только в терминале. Браузерный вход использует
-собственный OAuth-сервис:
+## Авторизация
+
+Есть три способа. **Для своего workspace проще один раз сохранить API-токен
+в системном keychain.** Готового публичного OAuth-сервиса zottion пока нет.
+Адрес страницы или профиля Notion нельзя использовать как `--server`.
+
+### API-токен: постоянный вход
+
+1. Открой [Connections в Notion](https://app.notion.com/developers/connections),
+   создай connection `zottion` с методом **API token** для своего workspace.
+   Включи **Read content**, **Update content** и **Insert content**.
+2. В **Content access → Edit access** выбери нужные страницы и сохрани доступ.
+   Другой путь: **••• → Connections → Add connections** на самой странице.
+   Доступ наследуется дочерними страницами. Скопируй токен из **Configuration**.
+3. В Bash выполни команды и вставь токен в скрытый запрос:
+
+```bash
+unset NOTION_TOKEN
+read -rsp 'Токен Notion: ' zottion_token
+printf '\n'
+printf '%s' "$zottion_token" | zottion auth login --token-stdin
+unset zottion_token
+zottion auth status --json
+```
+
+`verified: true` означает, что запрос к Notion прошёл. Токен хранится в
+Secret Service/Keychain, работает в новых терминалах и не требует OAuth-сервиса.
+`zottion auth logout` удаляет локальную запись. API-токен обновляют и отзывают
+в Notion; новый сохраняют той же командой `--token-stdin`.
+`auth refresh` и `auth logout --revoke` предназначены для OAuth.
+
+### Токен окружения: временно или для CI
+
+```bash
+read -rsp 'Токен Notion: ' NOTION_TOKEN
+printf '\n'
+export NOTION_TOKEN
+zottion auth status --json
+```
+
+Этот способ не сохраняет токен: он действует в текущем терминале и имеет
+приоритет над keychain. `unset NOTION_TOKEN` возвращает сохранённый вход.
+Не записывай токен в аргументы команды, shell-конфиги или файлы репозитория.
+
+### Браузерный OAuth: свой сервис
+
+Нужен запущенный OAuth-сервис zottion и зарегистрированная OAuth connection
+Notion. `--server` — **корневой адрес этого сервиса**, а не адрес Notion:
 
 ```sh
 zottion --timeout 300 auth login --server https://auth.example.org
@@ -70,10 +116,20 @@ zottion auth status --json
 zottion open PAGE_ID_OR_NOTION_URL
 ```
 
-Готовый production-сервис в репозиторий не входит. Запуск своего описан в
-[OAuth](docs/oauth.md). Для разработки и CI клиент принимает `NOTION_TOKEN` из
-окружения, без записи токена в настройки или argv. Токен окружения имеет
-приоритет над keychain. Страницы должны быть доступны этой connection.
+Запуск сервиса, callback и ротация описаны в [OAuth](docs/oauth.md).
+OAuth-токены также сохраняются в системном keychain. Страницы должны быть
+доступны этой connection.
+
+После любого способа входа:
+
+```sh
+zottion search Home --json
+zottion open PAGE_ID_OR_NOTION_URL
+```
+
+Копируй ссылку с конкретной страницы, а не адрес профиля workspace.
+Если поиск пустой или страница даёт 404, проверь её доступ для connection в Notion.
+Без подкоманды TUI запускается только в терминале.
 
 ## Работа
 
@@ -148,7 +204,7 @@ zottion draft apply DRAFT_ID
 Очистка `draft clear-cache` сохраняет черновики и журнал. Офлайн означает чтение
 загруженного и сохранение черновиков; автоматической отправки очереди нет.
 
-SQLite и настройки находятся в системных каталогах `zottion`. Токены OAuth —
+SQLite и настройки находятся в системных каталогах `zottion`. Сохранённый API-токен и токены OAuth —
 одной записью в Secret Service/Keychain. Профиль, workspace и идентичность
 учётных данных изолируют снимки, поиск, черновики и операции. Для тестов и
 переносимых окружений доступны `ZOTTION_CONFIG_DIR` и `ZOTTION_STATE_DIR`.

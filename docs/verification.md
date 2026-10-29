@@ -15,14 +15,14 @@
 |---|---|
 | cargo fmt --all --check | Успешно |
 | cargo clippy --workspace --all-targets --locked -- -D warnings | Успешно |
-| cargo test --workspace --locked | 40 passed, 0 failed |
+| cargo test --workspace --locked | 41 passed, 0 failed |
 | release workspace, x86_64-unknown-linux-gnu | Успешно; собраны оба бинарника |
 | PTY 80×24, Unicode paste, resize, :q, SIGINT | Успешно; termios восстановлен, черновик пережил выход |
 | Архив, SHA-256, запуск из пустого каталога | Успешно на текущей системе; архив и checksum в dist |
 | GitHub CI, Linux x86_64 / macOS ARM64 | fmt, Clippy, 40 тестов, PTY и release-сборки — успешно |
 | GitHub packages, Linux/macOS x86_64/ARM64 | Все четыре нативные сборки и упаковка — успешно |
 
-Набор: 11 тестов библиотеки клиента (TUI, auth, CLI), 16 прикладных,
+Набор: 12 тестов библиотеки клиента (TUI, auth, CLI), 16 прикладных,
 9 ядра/SQLite/HTTP, 1 процессный CLI-сценарий, 3 OAuth-сервиса.
 HTTP и OAuth provider в тестах локальные; SQLite, файловые блокировки,
 очередь хранилища и клиентские операции настоящие.
@@ -36,6 +36,17 @@ HTTP и OAuth provider в тестах локальные; SQLite, файлов�
 
 Linux x86_64-архив скачан из Actions: SHA-256 совпал, запуск и PTY-проверка
 прошли после распаковки. У остальных трёх архивов проверены SHA-256 и состав.
+
+## Реальный вход с API-токеном
+
+Проверены создание API-token connection и доступ к выбранному корню с дочерними
+страницами через обычный Chrome-профиль. `auth login --token-stdin` проверил
+`/users/me` и сохранил токен в native Secret Service Linux. Новый процесс без
+`NOTION_TOKEN` вернул `source: system_keyring` и `verified: true`; прошли поиск,
+чтение страницы с блоками и открытие загруженной страницы в офлайн-TUI.
+Установленный бинарник обновлён, корень закреплён локально. Токен не передавался
+в argv и не сохранялся в открытый файл; реальные ID и содержимое не входят в fixtures.
+Этот сценарий не проверяет OAuth и изменяющие операции Notion.
 
 ## Что подтверждено регрессиями
 
@@ -78,9 +89,8 @@ Linux x86_64-архив скачан из Actions: SHA-256 совпал, зап�
 
 ## До стабильного выпуска
 
-Реальные Notion API/OAuth и native Secret Service/Keychain не проверялись:
-тестового токена workspace и зарегистрированной public connection в окружении
-не было. Нужна приёмка [матрицы операций](capabilities.md) в выделенном workspace,
+Реальный браузерный OAuth, ротация/отзыв пары и native Keychain macOS ещё
+не проверены. Нужна приёмка [матрицы операций](capabilities.md) в выделенном тестовом workspace,
 включая сохранение ID/неизвестного, корзину/восстановление, статус и реальные views.
 
 Нативные сборки четырёх платформ прошли на GitHub Actions; macOS ARM64 также

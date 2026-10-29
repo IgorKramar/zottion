@@ -80,9 +80,17 @@ pub enum Command {
 #[derive(Subcommand)]
 pub enum AuthCommand {
     Login {
+        /// Корневой URL OAuth-сервиса zottion, не адрес страницы Notion.
+        #[arg(
+            long,
+            required_unless_present = "token_stdin",
+            conflicts_with = "token_stdin"
+        )]
+        server: Option<String>,
+        /// Проверить API-токен из stdin и сохранить в системном keychain.
         #[arg(long)]
-        server: String,
-        #[arg(long)]
+        token_stdin: bool,
+        #[arg(long, conflicts_with = "token_stdin")]
         no_browser: bool,
     },
     Status,
@@ -334,8 +342,33 @@ impl Cli {
         let options = self.options();
         if let Some(Command::Auth { command }) = &self.command {
             let value = match command {
-                AuthCommand::Login { server, no_browser } => {
-                    auth::login(&options, server, *no_browser).await?
+                AuthCommand::Login {
+                    server,
+                    token_stdin,
+                    no_browser,
+                } => {
+                    if *token_stdin {
+                        if io::stdin().is_terminal() {
+                            return Err(Error::input(
+                                "Передайте API-токен через stdin; ввод с отображением запрещён",
+                            ));
+                        }
+                        let mut token = String::new();
+                        io::stdin()
+                            .take(8193)
+                            .read_to_string(&mut token)
+                            .map_err(|_| Error::input("Не удалось прочитать API-токен из stdin"))?;
+                        auth::login_token(&options, token).await?
+                    } else {
+                        auth::login(
+                            &options,
+                            server.as_deref().ok_or_else(|| {
+                                Error::input("Укажите --server или --token-stdin")
+                            })?,
+                            *no_browser,
+                        )
+                        .await?
+                    }
                 }
                 AuthCommand::Status => auth::status(&options).await?,
                 AuthCommand::Refresh => auth::refresh(&options).await?,
@@ -728,6 +761,23 @@ mod tests {
             .is_ok()
         );
         assert!(Cli::try_parse_from(["zottion", "--timeout", "0", "search", "x"]).is_err());
+        assert!(Cli::try_parse_from(["zottion", "auth", "login", "--token-stdin"]).is_ok());
+        assert!(Cli::try_parse_from(["zottion", "auth", "login"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "zottion",
+                "auth",
+                "login",
+                "--token-stdin",
+                "--server",
+                "https://auth.example.com"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["zottion", "auth", "login", "--token-stdin", "--no-browser"])
+                .is_err()
+        );
         let value = envelope(
             json!({"results":[],"has_more":true,"next_cursor":"x"}),
             "p",
