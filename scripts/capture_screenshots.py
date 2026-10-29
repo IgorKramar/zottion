@@ -52,7 +52,7 @@ with tempfile.TemporaryDirectory(prefix="zottion-screenshots-") as directory:
     scope = db.execute("SELECT scope FROM drafts").fetchone()[0]
     db.execute("DELETE FROM drafts")
     def snapshot(kind, id, raw):
-        db.execute("INSERT OR REPLACE INTO snapshots(scope,kind,id,raw,complete) VALUES(?,?,?,?,1)", (scope, kind, id, encoded(raw)))
+        db.execute("INSERT OR REPLACE INTO snapshots(scope,kind,id,raw,complete,updated) VALUES(?,?,?,?,1,?)", (scope, kind, id, encoded(raw), int(time.time())))
     notes = page(page_id, "Zottion / Рабочая тетрадь")
     snapshot("resource", f"pages/{page_id}", notes)
     entries = [("heading_1", "Меньше вкладок. Больше законченных мыслей."),

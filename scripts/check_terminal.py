@@ -35,7 +35,7 @@ with tempfile.TemporaryDirectory(prefix="zottion-pty-") as directory:
     page = {"object": "page", "id": page_id, "properties": {"title": {"id": "title", "type": "title", "title": [{"type": "text", "text": {"content": "Тестовая страница"}}]}}}
     blocks = [{"object": "block", "id": block_id, "type": "paragraph", "has_children": False, "parent": {"page_id": page_id}, "paragraph": {"rich_text": [{"type": "text", "text": {"content": "Исходный текст"}}]}}, {"object": "block", "id": "58b15747-ff92-4e6b-94dd-ab080940ef04", "type": "unsupported", "unsupported": {}, "has_children": False}]
     for kind, key, value in [("resource", f"pages/{page_id}", page), ("resource", f"blocks/{block_id}", blocks[0]), ("list", encoded([f"blocks/{page_id}/children", None, []]), {"object": "list", "results": blocks, "has_more": False, "next_cursor": None})]:
-        connection.execute("INSERT INTO snapshots(scope,kind,id,raw,complete) VALUES(?,?,?,?,1)", (scope, kind, key, encoded(value)))
+        connection.execute("INSERT INTO snapshots(scope,kind,id,raw,complete,updated) VALUES(?,?,?,?,1,?)", (scope, kind, key, encoded(value), int(time.time())))
     connection.commit()
 
     def launch(cancel):

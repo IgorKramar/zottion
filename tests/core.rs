@@ -139,6 +139,7 @@ fn mock(responses: Vec<(u16, Value, &'static str)>) -> (String, thread::JoinHand
         loop {
             match server.accept() {
                 Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(2)))
                         .unwrap();
