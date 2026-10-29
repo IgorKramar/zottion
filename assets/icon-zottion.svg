@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160" role="img" aria-labelledby="title desc">
+<title id="title">zottion</title><desc id="desc">Лист заметки и терминальный курсор образуют букву Z.</desc>
+<rect x="7" y="7" width="146" height="146" rx="34" fill="#141923"/>
+<path d="M47 32h59l19 20v71a9 9 0 0 1-9 9H47a9 9 0 0 1-9-9V41a9 9 0 0 1 9-9Z" fill="#1f2a35" stroke="#3d5260" stroke-width="2"/>
+<path d="M106 33v19h18" fill="none" stroke="#86d9b8" stroke-width="3" stroke-linejoin="round"/>
+<path d="M57 64h46L57 108h46" fill="none" stroke="#86d9b8" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="m112 109 7 7-7 7m13 0h9" fill="none" stroke="#edc98c" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,736 @@
+use crate::{Error, Result, store::fingerprint};
+use fs2::FileExt;
+use keyring::v1::{Entry, Error as KeyringError};
+use reqwest::{Client, Url};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::{
+    collections::BTreeMap,
+    fs::{File, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+use tokio::time::{Instant, sleep};
+use uuid::Uuid;
+
+pub struct Options {
+    pub profile: String,
+    pub workspace: Option<String>,
+    pub offline: bool,
+    pub timeout: Duration,
+}
+/// No Debug: token-bearing state must never enter diagnostic logs.
+pub struct Resolved {
+    pub workspace: String,
+    pub identity: String,
+    pub token: Option<String>,
+    pub state_dir: PathBuf,
+}
+#[derive(Default, Serialize, Deserialize)]
+struct Config {
+    #[serde(default)]
+    profiles: BTreeMap<String, Profile>,
+}
+#[derive(Default, Serialize, Deserialize)]
+struct Profile {
+    selected_workspace: String,
+    #[serde(default)]
+    workspaces: BTreeMap<String, Workspace>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct Workspace {
+    identity: String,
+    #[serde(default)]
+    server: Option<String>,
+    #[serde(default)]
+    keyring: bool,
+    #[serde(default)]
+    last_identity: Option<String>,
+}
+#[derive(Serialize, Deserialize)]
+struct Credential {
+    access_token: String,
+    refresh_token: String,
+    workspace_id: String,
+    bot_id: String,
+    identity: String,
+    server: String,
+}
+struct Paths {
+    config: PathBuf,
+    state_dir: PathBuf,
+}
+fn paths() -> Result<Paths> {
+    let config_dir = std::env::var_os("ZOTTION_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| dirs::config_dir().map(|p| p.join("zottion")))
+        .ok_or_else(|| Error::new(1, "Не найден каталог настроек"))?;
+    let state_dir = std::env::var_os("ZOTTION_STATE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| dirs::data_local_dir().map(|p| p.join("zottion")))
+        .ok_or_else(|| Error::new(1, "Не найден каталог состояния"))?;
+    Ok(Paths {
+        config: config_dir.join("config.toml"),
+        state_dir,
+    })
+}
+fn validate(options: &Options) -> Result<()> {
+    let profile = &options.profile;
+    if profile.is_empty()
+        || profile.len() > 128
+        || profile == "."
+        || profile == ".."
+        || !profile
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    {
+        return Err(Error::input(
+            "Имя профиля: 1–128 букв, цифр, точек, '-' или '_'",
+        ));
+    }
+    if options
+        .workspace
+        .as_ref()
+        .is_some_and(|v| v.is_empty() || v.len() > 256 || v.chars().any(char::is_control))
+    {
+        return Err(Error::input("Некорректный workspace"));
+    }
+    if options.timeout.is_zero() {
+        return Err(Error::input("Срок запроса должен быть больше нуля"));
+    }
+    Ok(())
+}
+fn read_config(path: &Path) -> Result<Config> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            toml::from_str(&text).map_err(|_| Error::input("Некорректный config.toml zottion"))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Err(error) => Err(error.into()),
+    }
+}
+fn private_dir(path: &Path) -> Result<()> {
+    if !path.exists() {
+        std::fs::create_dir_all(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    Ok(())
+}
+struct Lock(File);
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+async fn lock(path: PathBuf) -> Result<Lock> {
+    tokio::task::spawn_blocking(move || {
+        private_dir(
+            path.parent()
+                .ok_or_else(|| Error::input("У блокировки нет каталога"))?,
+        )?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(path)?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(()) => return Ok(Lock(file)),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(Error::new(6, "Другой процесс изменяет профиль входа"));
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    })
+    .await
+    .map_err(|_| Error::new(1, "Рабочий поток входа остановлен"))?
+}
+fn write_config(path: &Path, config: &Config) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::input("У настроек нет каталога"))?;
+    private_dir(parent)?;
+    let temp = parent.join(format!(".config-{}.tmp", Uuid::new_v4()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| {
+        let mut file = options.open(&temp)?;
+        let text =
+            toml::to_string(config).map_err(|_| Error::new(1, "Не удалось сохранить настройки"))?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&temp, path)?;
+        File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temp);
+    }
+    result
+}
+fn workspace(config: &Config, options: &Options) -> String {
+    options
+        .workspace
+        .clone()
+        .or_else(|| {
+            config
+                .profiles
+                .get(&options.profile)
+                .map(|p| p.selected_workspace.clone())
+                .filter(|v| !v.is_empty())
+        })
+        .unwrap_or_else(|| "default".into())
+}
+fn entry(profile: &str, workspace: &str) -> Result<Entry> {
+    Entry::new(
+        "zottion",
+        &fingerprint(&json!([profile, workspace]).to_string()),
+    )
+    .map_err(|_| keyring_error())
+}
+fn keyring_error() -> Error {
+    Error::new(
+        3,
+        "Системное хранилище токенов недоступно; проверьте Secret Service/Keychain. Открытый файл не используется",
+    )
+}
+async fn load_credential(profile: String, workspace: String) -> Result<Option<Credential>> {
+    tokio::task::spawn_blocking(move || match entry(&profile, &workspace)?.get_password() {
+        Ok(raw) => serde_json::from_str(&raw)
+            .map(Some)
+            .map_err(|_| Error::new(3, "Повреждена запись токенов; выполните новый вход")),
+        Err(KeyringError::NoEntry) => Ok(None),
+        Err(_) => Err(keyring_error()),
+    })
+    .await
+    .map_err(|_| keyring_error())?
+}
+async fn save_credential(profile: String, workspace: String, credential: Credential) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let raw = serde_json::to_string(&credential)?;
+        entry(&profile, &workspace)?
+            .set_password(&raw)
+            .map_err(|_| keyring_error())
+    })
+    .await
+    .map_err(|_| keyring_error())?
+}
+async fn forget_credential(profile: String, workspace: String) -> Result<()> {
+    tokio::task::spawn_blocking(
+        move || match entry(&profile, &workspace)?.delete_credential() {
+            Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+            Err(_) => Err(keyring_error()),
+        },
+    )
+    .await
+    .map_err(|_| keyring_error())?
+}
+fn env_token() -> Option<String> {
+    std::env::var("NOTION_TOKEN")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+fn http(timeout: Duration) -> Result<Client> {
+    Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .build()
+        .map_err(|_| Error::new(1, "Не удалось создать HTTP-клиент входа"))
+}
+fn server_url(value: &str) -> Result<Url> {
+    let mut url = Url::parse(value).map_err(|_| Error::input("Некорректный URL OAuth-сервиса"))?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !(url.scheme() == "https"
+            || url.scheme() == "http"
+                && matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")))
+    {
+        return Err(Error::input(
+            "OAuth-сервис требует HTTPS; HTTP разрешён только для loopback",
+        ));
+    }
+    if url.path() != "/" && !url.path().is_empty() {
+        return Err(Error::input("Укажите корневой URL OAuth-сервиса"));
+    }
+    url.set_path("/");
+    Ok(url)
+}
+fn random() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+async fn response_json(response: reqwest::Response) -> Result<Value> {
+    let status = response.status();
+    if !status.is_success() {
+        return Err(Error::new(
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                3
+            } else {
+                6
+            },
+            "OAuth-сервис отклонил запрос; проверьте вход и доступность сервиса",
+        ));
+    }
+    response
+        .json()
+        .await
+        .map_err(|_| Error::new(6, "Некорректный ответ OAuth-сервиса"))
+}
+async fn remember(
+    config_path: &Path,
+    profile: &str,
+    workspace: &str,
+    value: Workspace,
+) -> Result<()> {
+    let _lock = lock(config_path.with_extension("lock")).await?;
+    let mut config = read_config(config_path)?;
+    let selected = config.profiles.entry(profile.into()).or_default();
+    selected.selected_workspace = workspace.into();
+    selected.workspaces.insert(workspace.into(), value);
+    write_config(config_path, &config)
+}
+fn select_environment(config: &mut Config, profile: &str, workspace: &str, identity: &str) {
+    let selected = config.profiles.entry(profile.into()).or_default();
+    selected.selected_workspace = workspace.into();
+    let stored = selected
+        .workspaces
+        .entry(workspace.into())
+        .or_insert_with(|| Workspace {
+            identity: identity.into(),
+            server: None,
+            keyring: false,
+            last_identity: None,
+        });
+    stored.last_identity = Some(identity.into());
+}
+pub async fn resolve(options: &Options) -> Result<Resolved> {
+    validate(options)?;
+    let paths = paths()?;
+    let config = read_config(&paths.config)?;
+    let workspace = workspace(&config, options);
+    if let Some(token) = env_token() {
+        let identity = fingerprint(&token);
+        let _config_lock = lock(paths.config.with_extension("lock")).await?;
+        let mut config = read_config(&paths.config)?;
+        select_environment(&mut config, &options.profile, &workspace, &identity);
+        write_config(&paths.config, &config)?;
+        return Ok(Resolved {
+            workspace,
+            identity,
+            token: Some(token),
+            state_dir: paths.state_dir,
+        });
+    }
+    let stored = config
+        .profiles
+        .get(&options.profile)
+        .and_then(|p| p.workspaces.get(&workspace));
+    if options.offline {
+        return Ok(Resolved {
+            workspace,
+            identity: stored
+                .map(|v| {
+                    v.last_identity
+                        .clone()
+                        .unwrap_or_else(|| v.identity.clone())
+                })
+                .unwrap_or_else(|| "signed-out".into()),
+            token: None,
+            state_dir: paths.state_dir,
+        });
+    }
+    if stored.is_some_and(|value| value.keyring) {
+        let credential = load_credential(options.profile.clone(), workspace.clone())
+            .await?
+            .ok_or_else(|| Error::new(3, "Токены отсутствуют; выполните auth login"))?;
+        if stored.and_then(|value| value.last_identity.as_ref()) != Some(&credential.identity) {
+            remember(
+                &paths.config,
+                &options.profile,
+                &workspace,
+                Workspace {
+                    identity: credential.identity.clone(),
+                    last_identity: Some(credential.identity.clone()),
+                    server: Some(credential.server.clone()),
+                    keyring: true,
+                },
+            )
+            .await?;
+        }
+        return Ok(Resolved {
+            workspace,
+            identity: credential.identity,
+            token: Some(credential.access_token),
+            state_dir: paths.state_dir,
+        });
+    }
+    Ok(Resolved {
+        workspace,
+        identity: "signed-out".into(),
+        token: None,
+        state_dir: paths.state_dir,
+    })
+}
+pub async fn login(options: &Options, server: &str, no_browser: bool) -> Result<Value> {
+    validate(options)?;
+    if options.offline {
+        return Err(Error::input("Вход недоступен с --offline"));
+    }
+    let server = server_url(server)?;
+    let paths = paths()?;
+    let _lock = lock(
+        paths
+            .state_dir
+            .join(format!("auth-{}.lock", fingerprint(&options.profile))),
+    )
+    .await?;
+    // Initialize keyring before receiving tokens; never substitute a plaintext file.
+    tokio::task::spawn_blocking(|| {
+        Entry::store_status()
+            .as_ref()
+            .map(|_| ())
+            .map_err(|_| keyring_error())
+    })
+    .await
+    .map_err(|_| keyring_error())??;
+    let client = http(options.timeout)?;
+    let verifier = random();
+    let challenge = fingerprint(&verifier);
+    let session = response_json(
+        client
+            .post(server.join("sessions").unwrap())
+            .json(&json!({"challenge":challenge}))
+            .send()
+            .await
+            .map_err(|_| Error::new(6, "Не удалось начать сеанс входа"))?,
+    )
+    .await?;
+    let id = session["id"]
+        .as_str()
+        .filter(|id| id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| Error::new(6, "Сервис не вернул ID сеанса"))?;
+    let authorize = Url::parse(
+        session["authorize_url"]
+            .as_str()
+            .ok_or_else(|| Error::new(6, "Нет URL входа"))?,
+    )
+    .map_err(|_| Error::new(6, "Некорректный URL входа"))?;
+    if authorize.scheme() != "https"
+        || authorize.host_str() != Some("api.notion.com")
+        || authorize.path() != "/v1/oauth/authorize"
+        || !authorize.username().is_empty()
+        || authorize.password().is_some()
+    {
+        return Err(Error::new(6, "OAuth-сервис вернул недопустимый URL входа"));
+    }
+    eprintln!("Откройте для входа: {authorize}");
+    if !no_browser && webbrowser::open(authorize.as_str()).is_err() {
+        eprintln!("Браузер не открыт; используйте URL выше.");
+    }
+    let deadline = Instant::now() + options.timeout.min(Duration::from_secs(300));
+    let endpoint = server.join(&format!("sessions/{id}/result")).unwrap();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(Error::new(
+                6,
+                "Срок входа истёк; начните auth login заново (при необходимости увеличьте --timeout до 300)",
+            ));
+        }
+        let response = client
+            .post(endpoint.clone())
+            .timeout(remaining)
+            .json(&json!({"verifier":verifier}))
+            .send()
+            .await
+            .map_err(|_| Error::new(6, "Соединение прервано во время входа; начните заново"))?;
+        if response.status().as_u16() == 202 {
+            sleep(Duration::from_secs(1).min(remaining)).await;
+            continue;
+        }
+        let raw = response_json(response).await?;
+        let credential = credential(raw, server.as_str(), None)?;
+        if options
+            .workspace
+            .as_ref()
+            .is_some_and(|workspace| workspace != &credential.workspace_id)
+        {
+            return Err(Error::input(
+                "Вход выполнен в другой workspace; повторите без --workspace или укажите его реальный ID",
+            ));
+        }
+        let workspace = credential.workspace_id.clone();
+        let identity = credential.identity.clone();
+        save_credential(options.profile.clone(), workspace.clone(), credential).await?;
+        remember(
+            &paths.config,
+            &options.profile,
+            &workspace,
+            Workspace {
+                last_identity: Some(identity.clone()),
+                identity,
+                server: Some(server.to_string()),
+                keyring: true,
+            },
+        )
+        .await?;
+        return Ok(
+            json!({"logged_in":true,"profile":options.profile,"workspace":workspace,"storage":"system_keyring"}),
+        );
+    }
+}
+fn credential(raw: Value, server: &str, prior: Option<&Credential>) -> Result<Credential> {
+    let access = raw["access_token"]
+        .as_str()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| Error::new(3, "Сервис не вернул access token"))?;
+    let refresh = raw["refresh_token"]
+        .as_str()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| Error::new(3, "Сервис не вернул refresh token"))?;
+    let workspace = raw["workspace_id"]
+        .as_str()
+        .or_else(|| prior.map(|v| v.workspace_id.as_str()))
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| Error::new(3, "Сервис не вернул workspace ID"))?;
+    let bot = raw["bot_id"]
+        .as_str()
+        .or_else(|| prior.map(|v| v.bot_id.as_str()))
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| Error::new(3, "Сервис не вернул bot ID"))?;
+    if prior.is_some_and(|prior| prior.workspace_id != workspace || prior.bot_id != bot) {
+        return Err(Error::new(
+            3,
+            "При обновлении изменилась идентичность; выполните новый вход",
+        ));
+    }
+    Ok(Credential {
+        access_token: access.into(),
+        refresh_token: refresh.into(),
+        workspace_id: workspace.into(),
+        bot_id: bot.into(),
+        identity: prior
+            .map(|v| v.identity.clone())
+            .unwrap_or_else(|| fingerprint(&json!([workspace, bot]).to_string())),
+        server: server.into(),
+    })
+}
+pub async fn status(options: &Options) -> Result<Value> {
+    let resolved = resolve(options).await?;
+    let source = if env_token().is_some() {
+        "environment"
+    } else if resolved.token.is_some() {
+        "system_keyring"
+    } else {
+        "none"
+    };
+    let verified = if !options.offline {
+        if let Some(token) = resolved.token {
+            crate::notion::Client::new(token, options.timeout)?
+                .get("users/me")
+                .await?;
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    Ok(
+        json!({"logged_in":source!="none","profile":options.profile,"workspace":resolved.workspace,"source":source,"verified":verified,"offline":options.offline,"cached_identity":resolved.identity!="signed-out"}),
+    )
+}
+pub async fn refresh(options: &Options) -> Result<Value> {
+    validate(options)?;
+    if options.offline {
+        return Err(Error::input("Обновление токенов недоступно с --offline"));
+    }
+    if env_token().is_some() {
+        return Err(Error::unsupported(
+            "Токен окружения обновляется его владельцем; уберите NOTION_TOKEN для OAuth-профиля",
+        ));
+    }
+    let paths = paths()?;
+    let _lock = lock(
+        paths
+            .state_dir
+            .join(format!("auth-{}.lock", fingerprint(&options.profile))),
+    )
+    .await?;
+    let config = read_config(&paths.config)?;
+    let workspace = workspace(&config, options);
+    let prior = load_credential(options.profile.clone(), workspace.clone())
+        .await?
+        .ok_or_else(|| Error::new(3, "Выполните auth login"))?;
+    let server = server_url(&prior.server)?;
+    let raw = response_json(
+        http(options.timeout)?
+            .post(server.join("refresh").unwrap())
+            .json(&json!({"refresh_token":prior.refresh_token}))
+            .send()
+            .await
+            .map_err(|_| {
+                Error::new(
+                    3,
+                    "Исход ротации токенов неизвестен; выполните новый auth login",
+                )
+            })?,
+    )
+    .await?;
+    let rotated = credential(raw, server.as_str(), Some(&prior))?;
+    save_credential(options.profile.clone(), workspace.clone(), rotated).await?;
+    Ok(json!({"refreshed":true,"profile":options.profile,"workspace":workspace}))
+}
+pub async fn logout(options: &Options, revoke: bool) -> Result<Value> {
+    validate(options)?;
+    if env_token().is_some() {
+        if revoke {
+            return Err(Error::unsupported(
+                "Токен окружения отзывается его владельцем в Notion",
+            ));
+        }
+        return Ok(
+            json!({"logged_out":false,"environment_token_still_active":true,"hint":"Удалите NOTION_TOKEN из окружения; OAuth-профили сохранены","drafts_preserved":true}),
+        );
+    }
+    if revoke && options.offline {
+        return Err(Error::input("Отзыв токена недоступен с --offline"));
+    }
+    let paths = paths()?;
+    let _lock = lock(
+        paths
+            .state_dir
+            .join(format!("auth-{}.lock", fingerprint(&options.profile))),
+    )
+    .await?;
+    let config = read_config(&paths.config)?;
+    let workspace = workspace(&config, options);
+    let stored = config
+        .profiles
+        .get(&options.profile)
+        .and_then(|p| p.workspaces.get(&workspace));
+    if stored.is_some_and(|value| value.keyring) {
+        if revoke {
+            let prior = load_credential(options.profile.clone(), workspace.clone())
+                .await?
+                .ok_or_else(|| Error::new(3, "Запись токенов отсутствует"))?;
+            let server = server_url(&prior.server)?;
+            response_json(
+                http(options.timeout)?
+                    .post(server.join("revoke").unwrap())
+                    .json(&json!({"token":prior.access_token}))
+                    .send()
+                    .await
+                    .map_err(|_| {
+                        Error::new(6, "Отзыв токена не подтверждён; локальная запись сохранена")
+                    })?,
+            )
+            .await?;
+        }
+        forget_credential(options.profile.clone(), workspace.clone()).await?;
+    }
+    let _config_lock = lock(paths.config.with_extension("lock")).await?;
+    let mut config = read_config(&paths.config)?;
+    if let Some(stored) = config
+        .profiles
+        .get_mut(&options.profile)
+        .and_then(|profile| profile.workspaces.get_mut(&workspace))
+    {
+        stored.keyring = false;
+    }
+    write_config(&paths.config, &config)?;
+    Ok(
+        json!({"logged_out":true,"profile":options.profile,"workspace":workspace,"revoked":revoke,"environment_token_still_active":env_token().is_some(),"drafts_preserved":true}),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn configuration_and_token_rotation_preserve_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings/config.toml");
+        let mut config = Config::default();
+        config.profiles.insert(
+            "work".into(),
+            Profile {
+                selected_workspace: "workspace".into(),
+                workspaces: BTreeMap::from([(
+                    "workspace".into(),
+                    Workspace {
+                        identity: "identity".into(),
+                        server: Some("https://auth.example.com/".into()),
+                        keyring: true,
+                        last_identity: None,
+                    },
+                )]),
+            },
+        );
+        select_environment(&mut config, "work", "workspace", "env-identity");
+        assert!(config.profiles["work"].workspaces["workspace"].keyring);
+        assert_eq!(
+            config.profiles["work"].workspaces["workspace"].identity,
+            "identity"
+        );
+        assert_eq!(
+            config.profiles["work"].workspaces["workspace"]
+                .last_identity
+                .as_deref(),
+            Some("env-identity")
+        );
+        write_config(&path, &config).unwrap();
+        let loaded = read_config(&path).unwrap();
+        assert_eq!(
+            loaded.profiles["work"].workspaces["workspace"].identity,
+            "identity"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let prior=credential(json!({"access_token":"old","refresh_token":"refresh-old","workspace_id":"workspace","bot_id":"bot"}),"https://auth.example.com/",None).unwrap();
+        let rotated = credential(
+            json!({"access_token":"new","refresh_token":"refresh-new"}),
+            &prior.server,
+            Some(&prior),
+        )
+        .unwrap();
+        assert_eq!(prior.identity, rotated.identity);
+        assert_eq!(rotated.refresh_token, "refresh-new");
+        assert!(
+            credential(
+                json!({"access_token":"new","refresh_token":"refresh-new","workspace_id":"other"}),
+                &prior.server,
+                Some(&prior)
+            )
+            .is_err()
+        );
+        assert!(server_url("http://evil.test").is_err());
+        assert!(server_url("https://user:secret@auth.example.com").is_err());
+        assert!(server_url("http://127.0.0.1:9393").is_ok());
+    }
+}

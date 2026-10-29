@@ -1,0 +1,5 @@
+CREATE TABLE snapshots(scope TEXT NOT NULL,kind TEXT NOT NULL,id TEXT NOT NULL,raw TEXT NOT NULL,complete INTEGER NOT NULL,updated INTEGER NOT NULL DEFAULT(unixepoch()),PRIMARY KEY(scope,kind,id));
+CREATE TABLE drafts(scope TEXT NOT NULL,id TEXT NOT NULL,base TEXT NOT NULL,local TEXT NOT NULL,updated INTEGER NOT NULL DEFAULT(unixepoch()),PRIMARY KEY(scope,id));
+CREATE TABLE operations(scope TEXT NOT NULL,id TEXT NOT NULL,method TEXT NOT NULL,path TEXT NOT NULL,base TEXT NOT NULL,local TEXT NOT NULL,state TEXT NOT NULL,response TEXT,updated INTEGER NOT NULL DEFAULT(unixepoch()),PRIMARY KEY(scope,id));
+CREATE VIRTUAL TABLE search_index USING fts5(scope UNINDEXED,kind UNINDEXED,id UNINDEXED,text);
+PRAGMA user_version=1;

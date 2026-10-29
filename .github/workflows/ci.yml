@@ -1,0 +1,23 @@
+name: CI
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Rust 1.91
+        run: rustup toolchain install 1.91.0 --profile minimal --component rustfmt --component clippy
+      - run: cargo +1.91.0 fmt --all --check
+      - run: cargo +1.91.0 clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo +1.91.0 test --workspace --locked
+      - name: Terminal integration
+        run: python3 scripts/check_terminal.py
+      - run: cargo +1.91.0 build --workspace --release --locked
