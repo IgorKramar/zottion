@@ -14,6 +14,8 @@ fn parse_id(input: &str) -> Result<Uuid> {
         || !url.host_str().is_some_and(|host| {
             host == "notion.so"
                 || host.ends_with(".notion.so")
+                || host == "notion.com"
+                || host.ends_with(".notion.com")
                 || host == "notion.site"
                 || host.ends_with(".notion.site")
         })

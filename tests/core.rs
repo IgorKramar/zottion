@@ -28,6 +28,18 @@ fn ids_rich_text_and_protected_content() {
             .parse::<PageId>()
             .is_err()
     );
+    assert_eq!(
+        "https://app.notion.com/p/workspace/b55c9c91384d452b81dbd1ef79372b75?v=other"
+            .parse::<PageId>()
+            .unwrap()
+            .to_string(),
+        id
+    );
+    assert!(
+        "https://notion.com.evil.test/b55c9c91384d452b81dbd1ef79372b75"
+            .parse::<PageId>()
+            .is_err()
+    );
     let original = json!({"object":"block","id":id,"type":"paragraph","paragraph":{"color":"red","rich_text":[
         {"type":"text","plain_text":"Привет","href":"https://example.com","annotations":{"bold":true,"color":"blue"},"text":{"content":"Привет","link":{"url":"https://example.com"}}},
         {"type":"mention","plain_text":"@Игорь","mention":{"type":"user","user":{"object":"user","id":id}},"annotations":{"italic":true}}

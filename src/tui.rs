@@ -14,9 +14,9 @@ use edtui::{EditorEventHandler, EditorMode, EditorState, EditorTheme, EditorView
 use futures_util::StreamExt;
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{
         Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
         Wrap,
@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use std::{collections::HashSet, future::Future, io, time::Duration};
 use tokio::sync::mpsc;
 
-const HELP: &str = "j/k или стрелки — выбор; Enter — открыть/редактировать\nh/l — свернуть/загрузить вложенность; Ctrl+W — дерево/документ\nTab — свойства; n — скрыть дерево; ? — справка; Ctrl+P — команды\nEdTUI: i Insert, v Visual; Esc → Normal → блоки\n:w — отправить черновики текущего экрана; :q — выйти с черновиками; :wq\n:open PAGE_ID · :append TYPE TEXT · :new TITLE · :title TITLE · :move PARENT_ID\n:favorite · :pin · :trash page|block (с подтверждением)\n:diff · :conflict — база / локальная / удалённая; L/R — выбор после подтверждения\n:format bold|italic|underline|strikethrough|code true|false [START END]\n:format link URL|null [START END] · :format color COLOR [START END]\n:table DATA_SOURCE · :board DATA_SOURCE [PROPERTY] · :view VIEW_ID\nТаблица: h/l — ячейка, e — редактор, Enter — страница, +/- — ширина\nДоска: h/l — колонка, j/k — карточка, H/L — сменить статус\n:task TITLE · :filter JSON · :sort JSON · :refresh\n:search TITLE — Notion; :local TEXT — загруженное содержимое\n:theme default|dark|light · :width 12..60\n:drafts · :apply DRAFT_ID · :operations · :check OP_ID\nСтруктурные команды (:append/:new/:task/:move/:trash) отправляют явно.\nОфлайн они сохраняют черновик; автоматической очереди отправки нет.";
+const HELP: &str = "Страницы и поиск\n  Ctrl+P или /   найти страницу, вставить ссылку, выбрать действие\n  Tab / Ctrl+W   переключить дерево и документ\n  Enter          открыть страницу или редактор\n  h/l            свернуть / загрузить вложенность\n\nЧтение и редактирование\n  j/k, ↑↓        выбрать блок или запись\n  PgUp/PgDn      прокрутить документ; Ctrl+U/D — полэкрана\n  i              писать в выбранном блоке\n  Esc            Insert → Normal → просмотр\n  Пробел         отметить задачу локально\n\nСохранение\n  Ctrl+S / :w    отправить черновики текущего экрана\n  Ctrl+Q / :q    выйти; неотправленные черновики сохраняются\n  Ctrl+R         обновить страницу\n  F2             показать свойства\n\nТаблица: h/l ячейка, e свойство. Доска: H/L сменить статус.\n: открывает строку команд. Ctrl+P показывает действия.";
 const PALETTE: &[(&str, &str)] = &[
     ("Открыть страницу", "open "),
     ("Таблица задач", "table "),
@@ -108,7 +108,10 @@ enum Confirm {
 }
 enum Overlay {
     Help,
-    Palette(usize),
+    Palette {
+        selected: usize,
+        query: String,
+    },
     Text {
         title: String,
         text: String,
@@ -181,13 +184,17 @@ struct Ui {
     saving: bool,
     drafts: HashSet<String>,
     local_text: std::collections::HashMap<String, String>,
+    local_checks: std::collections::HashMap<String, bool>,
     quit: bool,
     cancelled: bool,
     theme: String,
     width: u16,
     nav_area: Rect,
     content_area: Rect,
-    list_state: ListState,
+    document_scroll: usize,
+    document_limit: usize,
+    follow_selection: bool,
+    document_rows: Vec<(usize, Rect)>,
     nav_state: ListState,
     table_state: TableState,
 }
@@ -207,18 +214,22 @@ impl Ui {
             editor: None,
             command: None,
             overlay: None,
-            status: "Откройте :open PAGE_ID; ? — справка, Ctrl+P — команды".into(),
+            status: "Ctrl+P — найти страницу или действие".into(),
             pending: 0,
             saving: false,
             drafts,
             local_text: std::collections::HashMap::new(),
+            local_checks: std::collections::HashMap::new(),
             quit: false,
             cancelled: false,
-            theme: "default".into(),
+            theme: "dark".into(),
             width: 22,
             nav_area: Rect::default(),
             content_area: Rect::default(),
-            list_state: ListState::default(),
+            document_scroll: 0,
+            document_limit: 0,
+            follow_selection: true,
+            document_rows: Vec::new(),
             nav_state: ListState::default(),
             table_state: TableState::default(),
         }
@@ -432,6 +443,14 @@ impl Ui {
                 if value["operation"]["state"] == "confirmed");
         if self.accept(message) && reconcile {
             let drafts = app.store.drafts().await?;
+            self.local_checks = drafts
+                .iter()
+                .filter_map(|draft| {
+                    draft.local["to_do"]["checked"]
+                        .as_bool()
+                        .map(|checked| (draft.id.clone(), checked))
+                })
+                .collect();
             self.local_text = drafts
                 .iter()
                 .filter_map(|draft| {
@@ -491,9 +510,11 @@ impl Ui {
                     })
                     .collect();
                 self.selected = 0;
+                self.document_scroll = 0;
+                self.follow_selection = true;
                 self.grid = None;
                 self.nav_focus = false;
-                self.status = "NORMAL · Enter — блок, l — вложенность, :w — отправить".into();
+                self.status = "Страница загружена".into();
             }
             Ok(Payload::Children { id, blocks }) => {
                 if let Some(index) = self
@@ -559,7 +580,7 @@ impl Ui {
                     last_saved: text,
                 });
                 self.status =
-                    "NORMAL · i ввод · Esc обратно · :w отправить; JSON сохраняет атрибуты".into();
+                    "Свойство · i ввод · Ctrl+S отправить; JSON сохраняет атрибуты".into();
             }
             Ok(Payload::Search(items)) => {
                 self.nav = items;
@@ -604,6 +625,7 @@ impl Ui {
                     if !offline {
                         self.drafts.remove(&id);
                         self.local_text.remove(&id);
+                        self.local_checks.remove(&id);
                     }
                     self.update_resource(&value);
                 }
@@ -686,7 +708,109 @@ impl Ui {
             }
         }
         self.nav = nav;
-        self.nav_selected = self.nav_selected.min(self.nav.len().saturating_sub(1));
+        self.nav_selected = self.nav.iter().position(nav_selectable).unwrap_or(0);
+        Ok(())
+    }
+    fn palette_entries(&self) -> Vec<(String, String)> {
+        let query = match &self.overlay {
+            Some(Overlay::Palette { query, .. }) => query.trim(),
+            _ => return Vec::new(),
+        };
+        if query.parse::<PageId>().is_ok() {
+            return vec![(
+                "Открыть страницу по ссылке или ID".into(),
+                format!("open {query}"),
+            )];
+        }
+        let mut seen = HashSet::new();
+        let mut entries: Vec<_> = self
+            .nav
+            .iter()
+            .filter_map(|item| {
+                let command = item
+                    .id
+                    .map(|id| format!("open {id}"))
+                    .or_else(|| item.source.map(|id| format!("table {id}")))?;
+                seen.insert(command.clone())
+                    .then(|| (item.title.clone(), command))
+            })
+            .collect();
+        entries.extend(
+            PALETTE
+                .iter()
+                .map(|(label, command)| (label.to_string(), command.to_string())),
+        );
+        let lower = query.to_lowercase();
+        entries.retain(|(label, command)| {
+            label.to_lowercase().contains(&lower)
+                || command
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .contains(&lower)
+        });
+        if !query.is_empty() {
+            entries.push((
+                format!("Искать в Notion: {query}"),
+                format!("search {query}"),
+            ));
+        }
+        entries
+    }
+    fn open_nav(&mut self, app: &App, tx: &mpsc::UnboundedSender<Message>) {
+        if let Some(item) = self.nav.get(self.nav_selected) {
+            if let Some(id) = item.id {
+                self.open_page(app, tx, id);
+            } else if let Some(source) = item.source {
+                self.open_grid(app, tx, source, false, None, (Value::Null, Value::Null));
+            }
+        }
+    }
+    fn scroll_document(&mut self, delta: isize) {
+        self.document_scroll = self
+            .document_scroll
+            .saturating_add_signed(delta)
+            .min(self.document_limit);
+        self.follow_selection = false;
+    }
+    fn scroll_view(&mut self, delta: isize) {
+        if self.nav_focus || self.grid.is_some() {
+            self.vertical(delta);
+        } else {
+            self.scroll_document(delta);
+        }
+    }
+    async fn toggle_todo(&mut self, app: &App) -> Result<()> {
+        let Some(node) = self
+            .current_node()
+            .filter(|n| content::block_type(&n.raw) == "to_do")
+        else {
+            return Ok(());
+        };
+        let base = node.raw.clone();
+        let path = format!("blocks/{}", base["id"].as_str().unwrap_or(""));
+        let existing = app.store.draft(&path).await?;
+        let checked = !self
+            .local_checks
+            .get(&path)
+            .copied()
+            .unwrap_or(base["to_do"]["checked"] == true);
+        let patch = json!({"to_do":{"checked":checked}});
+        if let Some(draft) = existing {
+            if draft.base["kind"] != "patch" || draft.local != json!({"to_do":{"checked":!checked}})
+            {
+                return Err(Error::new(
+                    5,
+                    "У задачи есть другой черновик; сначала отправьте его через Ctrl+S",
+                ));
+            }
+            app.store.put_draft(&path, draft.base, patch).await?;
+        } else {
+            app.stage("PATCH", &path, Some(&path), base, patch).await?;
+        }
+        self.local_checks.insert(path.clone(), checked);
+        self.drafts.insert(path);
+        self.status = "Флажок сохранён локально · Ctrl+S отправить".into();
         Ok(())
     }
     fn visible_nodes(&self) -> Vec<usize> {
@@ -783,7 +907,7 @@ impl Ui {
         if let Some(edit) = &mut self.editor {
             edit.last_saved = saved_text;
         }
-        self.status = "Черновик сохранён локально · :w отправить".into();
+        self.status = "Черновик сохранён на устройстве · Ctrl+S отправить".into();
         Ok(())
     }
     async fn edit_block(&mut self, app: &App) -> Result<()> {
@@ -834,6 +958,7 @@ impl Ui {
             draft_id: id,
             last_saved: text,
         });
+        self.follow_selection = true;
         Ok(())
     }
     fn edit_property(&mut self, app: &App, tx: &mpsc::UnboundedSender<Message>) -> Result<()> {
@@ -1462,6 +1587,19 @@ impl Ui {
         if self.saving {
             return Ok(());
         }
+        if let Event::Key(key) = &event
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            match key.code {
+                KeyCode::Char('s') => return self.publish(app, tx, false).await,
+                KeyCode::Char('q') => {
+                    self.persist_editor(app).await?;
+                    self.quit = true;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
         if self.command.is_some() {
             match event {
                 Event::Key(key) => match key.code {
@@ -1489,6 +1627,7 @@ impl Ui {
         }
         if let Event::Key(key) = &event
             && key.code == KeyCode::Char(':')
+            && self.overlay.is_none()
             && self
                 .editor
                 .as_ref()
@@ -1501,7 +1640,11 @@ impl Ui {
             && key.code == KeyCode::Char('p')
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
-            self.overlay = Some(Overlay::Palette(0));
+            self.persist_editor(app).await?;
+            self.overlay = Some(Overlay::Palette {
+                selected: 0,
+                query: String::new(),
+            });
             return Ok(());
         }
         if self.overlay.is_some() {
@@ -1534,19 +1677,43 @@ impl Ui {
                     if key.code == KeyCode::Char('w') {
                         self.nav_focus = !self.nav_focus;
                         self.nav_visible = true;
+                    } else if key.code == KeyCode::Char('r') {
+                        self.refresh(app, tx);
+                    } else if matches!(key.code, KeyCode::Char('d') | KeyCode::Char('u')) {
+                        let delta = isize::try_from(self.content_area.height / 2).unwrap_or(1);
+                        self.scroll_view(if key.code == KeyCode::Char('d') {
+                            delta
+                        } else {
+                            -delta
+                        });
                     }
                     return Ok(());
                 }
                 match key.code {
                     KeyCode::Char('q') => self.quit = true,
                     KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
-                    KeyCode::Tab => self.properties = !self.properties,
-                    KeyCode::BackTab => {
+                    KeyCode::F(2) => self.properties = !self.properties,
+                    KeyCode::Tab | KeyCode::BackTab => {
                         self.nav_focus = !self.nav_focus;
                         self.nav_visible = true;
                     }
                     KeyCode::Char('n') => self.nav_visible = !self.nav_visible,
-                    KeyCode::Char('/') => self.command = Some("search ".into()),
+                    KeyCode::Char('/') => {
+                        self.overlay = Some(Overlay::Palette {
+                            selected: 0,
+                            query: String::new(),
+                        })
+                    }
+                    KeyCode::Esc => {
+                        self.nav_focus = false;
+                        self.properties = false;
+                    }
+                    KeyCode::PageDown => {
+                        self.scroll_view(isize::try_from(self.content_area.height).unwrap_or(1))
+                    }
+                    KeyCode::PageUp => {
+                        self.scroll_view(-isize::try_from(self.content_area.height).unwrap_or(1))
+                    }
                     KeyCode::Char('j') | KeyCode::Down => self.vertical(1),
                     KeyCode::Char('k') | KeyCode::Up => self.vertical(-1),
                     KeyCode::Char('h') | KeyCode::Left => {
@@ -1567,25 +1734,31 @@ impl Ui {
                     KeyCode::Char('L') => self.move_card(app, tx, 1)?,
                     KeyCode::Char('+') => self.width = (self.width + 2).min(60),
                     KeyCode::Char('-') => self.width = self.width.saturating_sub(2).max(12),
+                    KeyCode::Char('b') if self.grid.is_some() && !self.nav_focus => {
+                        let grid = self.grid.as_mut().unwrap();
+                        if grid.group.is_empty() {
+                            return Err(Error::unsupported(
+                                "Для доски нужно свойство status/select",
+                            ));
+                        }
+                        grid.board = !grid.board;
+                    }
                     KeyCode::Char('e') if self.grid.is_some() && !self.nav_focus => {
                         self.edit_property(app, tx)?
                     }
+                    KeyCode::Char('i') | KeyCode::Char('e')
+                        if self.grid.is_none() && !self.nav_focus =>
+                    {
+                        self.edit_block(app).await?;
+                        if key.code == KeyCode::Char('i')
+                            && let Some(edit) = &mut self.editor
+                        {
+                            edit.state.mode = EditorMode::Insert;
+                        }
+                    }
                     KeyCode::Enter => {
                         if self.nav_focus {
-                            if let Some(id) = self.nav.get(self.nav_selected).and_then(|n| n.id) {
-                                self.open_page(app, tx, id);
-                            } else if let Some(source) =
-                                self.nav.get(self.nav_selected).and_then(|n| n.source)
-                            {
-                                self.open_grid(
-                                    app,
-                                    tx,
-                                    source,
-                                    false,
-                                    None,
-                                    (Value::Null, Value::Null),
-                                );
-                            }
+                            self.open_nav(app, tx);
                         } else if let Some(grid) = &self.grid {
                             if let Some(id) = grid
                                 .rows
@@ -1644,42 +1817,56 @@ impl Ui {
                         }
                     }
                     KeyCode::Char(' ') => {
-                        if let Some(node) = self.current_node()
-                            && content::block_type(&node.raw) == "to_do"
-                        {
-                            let base = node.raw.clone();
-                            let path = format!("blocks/{}", base["id"].as_str().unwrap_or(""));
-                            let checked = base["to_do"]["checked"] != true;
-                            let id = app
-                                .stage(
-                                    "PATCH",
-                                    &path,
-                                    Some(&path),
-                                    base,
-                                    json!({"to_do":{"checked":checked}}),
-                                )
-                                .await?;
-                            self.drafts.insert(id);
-                            self.status = "Флажок сохранён локально · :w отправить".into();
+                        if !self.nav_focus {
+                            self.toggle_todo(app).await?;
                         }
                     }
                     _ => {}
                 }
             }
             Event::Mouse(mouse) => match mouse.kind {
-                MouseEventKind::ScrollDown => self.vertical(1),
-                MouseEventKind::ScrollUp => self.vertical(-1),
+                MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                    let delta = if mouse.kind == MouseEventKind::ScrollDown {
+                        1
+                    } else {
+                        -1
+                    };
+                    if self.nav_area.contains((mouse.column, mouse.row).into()) {
+                        let previous = self.nav_focus;
+                        self.nav_focus = true;
+                        self.vertical(delta);
+                        self.nav_focus = previous;
+                    } else if self.grid.is_some() {
+                        let previous = self.nav_focus;
+                        self.nav_focus = false;
+                        self.vertical(delta);
+                        self.nav_focus = previous;
+                    } else {
+                        self.scroll_document(delta * 3);
+                    }
+                }
                 MouseEventKind::Down(_) => {
                     if self.nav_area.contains((mouse.column, mouse.row).into()) {
                         self.nav_focus = true;
-                        self.nav_selected =
-                            (usize::from(mouse.row.saturating_sub(self.nav_area.y + 1))
-                                + self.nav_state.offset())
-                            .min(self.nav.len().saturating_sub(1));
+                        let selected = (usize::from(mouse.row.saturating_sub(self.nav_area.y))
+                            + self.nav_state.offset())
+                        .min(self.nav.len().saturating_sub(1));
+                        if self.nav.get(selected).is_some_and(nav_selectable) {
+                            self.nav_selected = selected;
+                            self.open_nav(app, tx);
+                        }
                     } else if self.content_area.contains((mouse.column, mouse.row).into()) {
                         self.nav_focus = false;
                         if let Some(grid) = &mut self.grid {
-                            if !grid.board {
+                            if grid.board {
+                                if let Some((index, _)) =
+                                    self.document_rows.iter().find(|(_, rect)| {
+                                        rect.contains((mouse.column, mouse.row).into())
+                                    })
+                                {
+                                    grid.row = *index;
+                                }
+                            } else {
                                 grid.row = (usize::from(
                                     mouse.row.saturating_sub(self.content_area.y + 2),
                                 ) + self.table_state.offset())
@@ -1689,11 +1876,13 @@ impl Ui {
                                 ) / usize::from(self.width + 1))
                                 .min(grid.columns.len().saturating_sub(1));
                             }
-                        } else {
-                            self.selected =
-                                (usize::from(mouse.row.saturating_sub(self.content_area.y + 1))
-                                    + self.list_state.offset())
-                                .min(self.visible_nodes().len().saturating_sub(1));
+                        } else if let Some((index, _)) = self
+                            .document_rows
+                            .iter()
+                            .find(|(_, rect)| rect.contains((mouse.column, mouse.row).into()))
+                        {
+                            self.selected = *index;
+                            self.follow_selection = true;
                         }
                     }
                 }
@@ -1705,7 +1894,21 @@ impl Ui {
     }
     fn vertical(&mut self, delta: isize) {
         if self.nav_focus {
-            self.nav_selected = step(self.nav_selected, delta, self.nav.len());
+            let selectable: Vec<_> = self
+                .nav
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| nav_selectable(item))
+                .map(|(index, _)| index)
+                .collect();
+            if let Some(position) = selectable
+                .iter()
+                .position(|index| *index == self.nav_selected)
+            {
+                self.nav_selected = selectable[step(position, delta, selectable.len())];
+            } else if let Some(index) = selectable.first() {
+                self.nav_selected = *index;
+            }
         } else if let Some(grid) = &mut self.grid {
             if grid.board {
                 let columns = board_columns(grid);
@@ -1729,6 +1932,7 @@ impl Ui {
             }
         } else {
             self.selected = step(self.selected, delta, self.visible_nodes().len());
+            self.follow_selection = true;
         }
     }
     fn horizontal(&mut self, delta: isize) {
@@ -1795,21 +1999,46 @@ impl Ui {
         tx: &mpsc::UnboundedSender<Message>,
         event: Event,
     ) -> Result<()> {
+        if let Event::Paste(text) = &event
+            && let Some(Overlay::Palette { query, selected }) = &mut self.overlay
+        {
+            query.push_str(&content::terminal_text(text).replace('\n', " "));
+            *selected = 0;
+            return Ok(());
+        }
+        let entries = self.palette_entries();
         let Event::Key(key) = event else {
             return Ok(());
         };
-        if key.code == KeyCode::Esc || key.code == KeyCode::Char('q') {
+        if key.code == KeyCode::Esc
+            || (key.code == KeyCode::Char('q')
+                && !matches!(self.overlay, Some(Overlay::Palette { .. })))
+        {
             self.overlay = None;
             return Ok(());
         }
         match self.overlay.as_mut().unwrap() {
-            Overlay::Palette(selected) => match key.code {
-                KeyCode::Down | KeyCode::Char('j') => *selected = step(*selected, 1, PALETTE.len()),
-                KeyCode::Up | KeyCode::Char('k') => *selected = step(*selected, -1, PALETTE.len()),
+            Overlay::Palette { selected, query } => match key.code {
+                KeyCode::Down => *selected = step(*selected, 1, entries.len()),
+                KeyCode::Up => *selected = step(*selected, -1, entries.len()),
+                KeyCode::Backspace => {
+                    query.pop();
+                    *selected = 0;
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    query.push(c);
+                    *selected = 0;
+                }
                 KeyCode::Enter => {
-                    let command = PALETTE[*selected].1.to_owned();
-                    self.overlay = None;
-                    self.command = Some(command);
+                    if let Some((_, command)) = entries.get(*selected) {
+                        let command = command.clone();
+                        self.overlay = None;
+                        if command.ends_with(' ') {
+                            self.command = Some(command);
+                        } else {
+                            self.command(app, tx, &command).await?;
+                        }
+                    }
                 }
                 _ => {}
             },
@@ -1896,6 +2125,8 @@ pub async fn run(app: App, initial: Option<PageId>) -> Result<()> {
             && let Some(text) = draft.local["text"].as_str()
         {
             ui.local_text.insert(draft.id, text.into());
+        } else if let Some(checked) = draft.local["to_do"]["checked"].as_bool() {
+            ui.local_checks.insert(draft.id, checked);
         }
     }
     ui.load_nav(&app).await?;
@@ -1908,8 +2139,23 @@ pub async fn run(app: App, initial: Option<PageId>) -> Result<()> {
     let mut terminal = ratatui::try_init()?;
     execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
     let (tx, mut rx) = mpsc::unbounded_channel();
-    if let Some(id) = initial {
+    let recent = app.navigation("recent").await?;
+    let resume = recent
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|item| item["id"].as_str()?.parse().ok());
+    if let Some(id) = initial
+        .or(resume)
+        .or_else(|| ui.nav.iter().find_map(|item| item.id))
+    {
         ui.open_page(&app, &tx, id);
+    } else {
+        ui.nav_focus = true;
+        ui.overlay = Some(Overlay::Palette {
+            selected: 0,
+            query: String::new(),
+        });
     }
     let mut events = EventStream::new();
     while !ui.quit {
@@ -1927,10 +2173,16 @@ pub async fn run(app: App, initial: Option<PageId>) -> Result<()> {
 
 fn draw(frame: &mut Frame, ui: &mut Ui, offline: bool) {
     let area = frame.area();
-    let base = theme_style(&ui.theme);
-    frame.render_widget(Block::default().style(base), area);
+    frame.render_widget(Block::default().style(theme_style(&ui.theme)), area);
+    if area.width < 20 || area.height < 8 {
+        frame.render_widget(
+            Paragraph::new("Увеличьте терминал · Ctrl+Q выйти").wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
     let vertical = Layout::vertical([
-        Constraint::Length(1),
+        Constraint::Length(2),
         Constraint::Min(1),
         Constraint::Length(2),
     ])
@@ -1940,27 +2192,56 @@ fn draw(frame: &mut Frame, ui: &mut Ui, offline: bool) {
         .as_ref()
         .map(|g| {
             format!(
-                "{} · {}",
+                "{} / {}",
+                g.name,
                 if g.board {
                     "Доска"
                 } else {
                     "Таблица"
-                },
-                g.name
+                }
             )
         })
         .or_else(|| ui.page.as_ref().map(content::page_title))
         .unwrap_or_else(|| "Заметки и задачи".into());
+    let header =
+        Layout::horizontal([Constraint::Min(1), Constraint::Length(20)]).split(vertical[0]);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" zottion ", accent(&ui.theme).add_modifier(Modifier::BOLD)),
+            Span::styled(" zottion", accent(&ui.theme).add_modifier(Modifier::BOLD)),
+            Span::styled("  /  ", muted(&ui.theme)),
             Span::raw(content::terminal_text(&title)),
-        ])),
+        ]))
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(muted(&ui.theme)),
+        ),
         vertical[0],
     );
+    let header_state = format!(
+        "{}{} ",
+        if ui.saving {
+            "Отправка…"
+        } else if offline {
+            "Офлайн"
+        } else {
+            "Notion"
+        },
+        if ui.drafts.is_empty() {
+            String::new()
+        } else {
+            format!(" · *{}", ui.drafts.len())
+        }
+    );
+    frame.render_widget(
+        Paragraph::new(header_state)
+            .right_aligned()
+            .style(muted(&ui.theme)),
+        header[1],
+    );
     let body = vertical[1];
-    let nav_width = if ui.nav_visible && body.width >= 60 {
-        20
+    let nav_width = if ui.nav_visible && body.width >= 70 {
+        (body.width / 4).clamp(22, 30)
     } else {
         0
     };
@@ -1978,56 +2259,79 @@ fn draw(frame: &mut Frame, ui: &mut Ui, offline: bool) {
     ui.nav_area = columns[0];
     ui.content_area = columns[1];
     if nav_width > 0 {
-        let items: Vec<ListItem> = ui
+        let items: Vec<_> = ui
             .nav
             .iter()
-            .map(|n| {
-                ListItem::new(content::terminal_text(&format!(
-                    "{}{}{}",
-                    " ".repeat(n.depth.min(10)),
-                    if n.id.is_some() {
-                        if n.expanded { "- " } else { "+ " }
-                    } else {
-                        ""
-                    },
-                    n.title
-                )))
+            .map(|item| {
+                if !nav_selectable(item) {
+                    ListItem::new(Line::styled(format!(" {}", item.title), muted(&ui.theme)))
+                } else {
+                    let current = item.id.is_some_and(|id| {
+                        ui.page
+                            .as_ref()
+                            .is_some_and(|page| page["id"] == id.to_string())
+                    });
+                    let marker = if item.expanded { "▾" } else { "▸" };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            format!("{}{} ", " ".repeat(item.depth.min(8)), marker),
+                            muted(&ui.theme),
+                        ),
+                        Span::styled(
+                            content::terminal_text(&item.title),
+                            if current {
+                                accent(&ui.theme).add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default()
+                            },
+                        ),
+                    ]))
+                }
             })
             .collect();
-        ui.nav_state.select(Some(ui.nav_selected));
+        ui.nav_state.select(
+            ui.nav
+                .get(ui.nav_selected)
+                .filter(|_| ui.nav_focus)
+                .map(|_| ui.nav_selected),
+        );
         frame.render_stateful_widget(
             List::new(items)
-                .block(Block::bordered().title(if ui.nav_focus {
-                    " Навигация * "
-                } else {
-                    " Навигация "
-                }))
-                .highlight_style(accent(&ui.theme).add_modifier(Modifier::REVERSED)),
+                .block(
+                    Block::default()
+                        .borders(Borders::RIGHT)
+                        .border_style(muted(&ui.theme)),
+                )
+                .highlight_symbol("› ")
+                .highlight_style(selection(&ui.theme, true)),
             columns[0],
             &mut ui.nav_state,
         );
     }
-    if let Some(edit) = &mut ui.editor {
-        let title = match &edit.target {
-            Target::Block(base) => format!(
-                " {} · {} ",
-                content::block_type(base),
-                edit.state.mode.name()
-            ),
-            Target::Property { name, kind, .. } => format!(
-                " {} ({}) · {} ",
-                content::terminal_text(name),
-                kind,
-                edit.state.mode.name()
-            ),
+    if ui
+        .editor
+        .as_ref()
+        .is_some_and(|edit| matches!(edit.target, Target::Property { .. }))
+    {
+        let edit = ui.editor.as_mut().unwrap();
+        let name = match &edit.target {
+            Target::Property { name, .. } => content::terminal_text(name),
+            _ => String::new(),
         };
         frame.render_widget(
             EditorView::new(&mut edit.state).wrap(true).theme(
                 EditorTheme::default()
-                    .base(base)
-                    .block(Block::bordered().title(title)),
+                    .hide_status_line()
+                    .selection_style(selection(&ui.theme, true))
+                    .cursor_style(Style::default().add_modifier(Modifier::REVERSED))
+                    .base(theme_style(&ui.theme))
+                    .block(
+                        Block::bordered()
+                            .title(format!(" {name} · Esc обратно "))
+                            .border_style(accent(&ui.theme)),
+                    ),
             ),
-            columns[1],
+            columns[1].inner(Margin::new(1, 1)),
         );
     } else if let Some(grid) = &ui.grid {
         if grid.board {
@@ -2036,85 +2340,7 @@ fn draw(frame: &mut Frame, ui: &mut Ui, offline: bool) {
             draw_table(frame, ui, columns[1]);
         }
     } else {
-        let visible = ui.visible_nodes();
-        let items: Vec<ListItem> = visible
-            .iter()
-            .map(|index| {
-                let node = &ui.nodes[*index];
-                let kind = content::block_type(&node.raw);
-                let id = node.raw["id"].as_str().unwrap_or("");
-                let dirty = ui.drafts.contains(&format!("blocks/{id}"));
-                let readonly = !content::TEXT_BLOCKS.contains(&kind)
-                    && !matches!(kind, "child_page" | "divider");
-                let marker = if dirty {
-                    "*"
-                } else if readonly {
-                    "!"
-                } else {
-                    " "
-                };
-                let prefix = match kind {
-                    "heading_1" => "# ",
-                    "heading_2" => "## ",
-                    "heading_3" => "### ",
-                    "bulleted_list_item" => "- ",
-                    "numbered_list_item" => "1. ",
-                    "quote" => "> ",
-                    "to_do" => {
-                        if node.raw["to_do"]["checked"] == true {
-                            "[x] "
-                        } else {
-                            "[ ] "
-                        }
-                    }
-                    "child_page" => "[page] ",
-                    "divider" => "----------",
-                    _ => "",
-                };
-                let text = ui
-                    .local_text
-                    .get(&format!("blocks/{id}"))
-                    .cloned()
-                    .unwrap_or_else(|| content::block_text(&node.raw));
-                let suffix = if node.raw["has_children"] == true && !node.loaded {
-                    " [+ не загружено]"
-                } else if readonly {
-                    " [защищено]"
-                } else {
-                    ""
-                };
-                let line = format!(
-                    "{marker}{}{}{}{}",
-                    "  ".repeat(node.depth.min(20)),
-                    prefix,
-                    if text.is_empty() {
-                        format!("[{kind}]")
-                    } else {
-                        text
-                    },
-                    suffix
-                );
-                ListItem::new(content::terminal_text(&line)).style(
-                    if kind.starts_with("heading_") {
-                        Style::default().add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    },
-                )
-            })
-            .collect();
-        if items.is_empty() {
-            frame.render_widget(Paragraph::new("Откройте страницу: :open ID или URL\nCtrl+P — команды · ? — справка\n\nИзбранное и корни доступны в дереве.\nНеподдерживаемые блоки защищены от изменений.").wrap(Wrap{trim:false}).block(Block::bordered().title(" Документ ")),columns[1]);
-        } else {
-            ui.list_state.select(Some(ui.selected));
-            frame.render_stateful_widget(
-                List::new(items)
-                    .block(Block::bordered().title(" Документ · * черновик · ! защищено "))
-                    .highlight_style(accent(&ui.theme).add_modifier(Modifier::REVERSED)),
-                columns[1],
-                &mut ui.list_state,
-            );
-        }
+        draw_document(frame, ui, columns[1]);
     }
     if prop_width > 0 {
         draw_properties(frame, ui, columns[2]);
@@ -2131,27 +2357,53 @@ fn draw(frame: &mut Frame, ui: &mut Ui, offline: bool) {
     let mode = ui
         .editor
         .as_ref()
-        .map(|e| e.state.mode.name())
-        .unwrap_or_else(|| {
-            if ui.nav_focus {
-                "TREE".into()
-            } else {
-                "NORMAL".into()
-            }
+        .map(|e| match e.state.mode.name().as_str() {
+            "Insert" => "Ввод",
+            "Visual" => "Выделение",
+            _ => "Normal",
+        })
+        .unwrap_or(if ui.nav_focus {
+            "Страницы"
+        } else {
+            "Просмотр"
         });
-    let source = if offline { "OFFLINE" } else { "Notion" };
-    let busy = if ui.pending > 0 {
-        format!(" · загрузка {}", ui.pending)
+    let message = if ui.saving {
+        "Отправка; дождитесь подтверждения…"
+    } else if ui.pending > 0 {
+        "Загрузка…"
     } else {
-        String::new()
+        &ui.status
+    };
+    let is_error = message.as_bytes().get(1) == Some(&b':')
+        && message.as_bytes().first().is_some_and(u8::is_ascii_digit);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!(" {mode}  "), accent(&ui.theme)),
+            Span::styled(
+                content::terminal_text(message),
+                if is_error {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    muted(&ui.theme)
+                },
+            ),
+        ])),
+        Rect::new(vertical[2].x, vertical[2].y, vertical[2].width, 1),
+    );
+    let hints = if ui.editor.is_some() {
+        " Esc Normal/блоки  Ctrl+P поиск  Ctrl+S отправить  Ctrl+Q выйти"
+    } else if ui.nav_focus {
+        " Enter открыть  Tab документ  Ctrl+P поиск  Ctrl+Q выйти"
+    } else if ui.grid.is_some() {
+        " h/l колонки  e править  b вид  Ctrl+P поиск  Ctrl+S отправить  Ctrl+Q выйти"
+    } else if area.width < 100 {
+        " i писать  Tab дерево  Ctrl+P поиск  Ctrl+S отправить  Ctrl+Q выйти  ? помощь"
+    } else {
+        " i писать  Enter открыть  Tab страницы  Ctrl+P поиск  Ctrl+S отправить  Ctrl+Q выйти  F2 свойства  ? помощь"
     };
     frame.render_widget(
-        Paragraph::new(format!(
-            " {mode} · {source}{busy} · {} локальных черновиков\n {}",
-            ui.drafts.len(),
-            content::terminal_text(&ui.status)
-        )),
-        vertical[2],
+        Paragraph::new(hints).style(muted(&ui.theme)),
+        Rect::new(vertical[2].x, vertical[2].y + 1, vertical[2].width, 1),
     );
     if let Some(command) = &ui.command {
         let command_area = Rect::new(vertical[2].x, vertical[2].y + 1, vertical[2].width, 1);
@@ -2164,9 +2416,304 @@ fn draw(frame: &mut Frame, ui: &mut Ui, offline: bool) {
         frame.set_cursor_position((command_area.x + cursor, command_area.y));
     }
     if let Some(overlay) = &ui.overlay {
-        draw_overlay(frame, overlay, &ui.theme);
+        draw_overlay(frame, overlay, &ui.theme, &ui.palette_entries());
     }
 }
+
+fn document_text(ui: &Ui, node: &Node, selected: bool) -> Text<'static> {
+    let kind = content::block_type(&node.raw);
+    let id = format!("blocks/{}", node.raw["id"].as_str().unwrap_or(""));
+    let checked = ui
+        .local_checks
+        .get(&id)
+        .copied()
+        .unwrap_or(node.raw["to_do"]["checked"] == true);
+    let prefix = match kind {
+        "bulleted_list_item" => "• ",
+        "numbered_list_item" => "1. ",
+        "to_do" => {
+            if checked {
+                "[x] "
+            } else {
+                "[ ] "
+            }
+        }
+        "quote" => "│ ",
+        "callout" => "› ",
+        "child_page" | "child_database" | "toggle" => {
+            if node.expanded {
+                "▾ "
+            } else {
+                "▸ "
+            }
+        }
+        "divider" => "────────────────────",
+        _ => "",
+    };
+    let base = if kind.starts_with("heading_") {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else if kind == "to_do" && checked {
+        muted(&ui.theme)
+    } else {
+        Style::default()
+    };
+    let plain = ui.local_text.get(&id).cloned().unwrap_or_else(|| {
+        let text = content::block_text(&node.raw);
+        if text.is_empty() {
+            node.raw[kind]["title"].as_str().unwrap_or("").to_owned()
+        } else {
+            text
+        }
+    });
+    let mut lines = vec![Line::from(vec![Span::styled(
+        format!(
+            "{}{}{}",
+            "  ".repeat(node.depth.min(12)),
+            if ui.drafts.contains(&id) { "* " } else { "" },
+            prefix
+        ),
+        muted(&ui.theme),
+    )])];
+    if ui.local_text.contains_key(&id)
+        || node.raw[kind]["rich_text"]
+            .as_array()
+            .is_none_or(|rich| rich.is_empty())
+    {
+        for (index, line) in content::terminal_text(&plain).split('\n').enumerate() {
+            if index > 0 {
+                lines.push(Line::default());
+            }
+            lines
+                .last_mut()
+                .unwrap()
+                .spans
+                .push(Span::styled(line.to_owned(), base));
+        }
+    } else {
+        for part in node.raw[kind]["rich_text"].as_array().unwrap() {
+            let mut style = base;
+            for (name, modifier) in [
+                ("bold", Modifier::BOLD),
+                ("italic", Modifier::ITALIC),
+                ("underline", Modifier::UNDERLINED),
+                ("strikethrough", Modifier::CROSSED_OUT),
+            ] {
+                if part["annotations"][name] == true {
+                    style = style.add_modifier(modifier);
+                }
+            }
+            if part["href"].is_string() || part["text"]["link"]["url"].is_string() {
+                style = style
+                    .patch(accent(&ui.theme))
+                    .add_modifier(Modifier::UNDERLINED);
+            }
+            let text = part["text"]["content"]
+                .as_str()
+                .or_else(|| part["plain_text"].as_str())
+                .unwrap_or("");
+            for (index, line) in content::terminal_text(text).split('\n').enumerate() {
+                if index > 0 {
+                    lines.push(Line::default());
+                }
+                lines
+                    .last_mut()
+                    .unwrap()
+                    .spans
+                    .push(Span::styled(line.to_owned(), style));
+            }
+        }
+    }
+    if plain.is_empty() && kind != "divider" {
+        lines.last_mut().unwrap().spans.push(Span::styled(
+            if content::TEXT_BLOCKS.contains(&kind) {
+                if selected {
+                    "Пустой блок · i писать".into()
+                } else {
+                    " ".into()
+                }
+            } else {
+                format!("{kind} · защищено")
+            },
+            muted(&ui.theme),
+        ));
+    }
+    if node.raw["has_children"] == true && !node.loaded {
+        lines
+            .last_mut()
+            .unwrap()
+            .spans
+            .push(Span::styled("  ▸ не загружено", muted(&ui.theme)));
+    }
+    if !content::TEXT_BLOCKS.contains(&kind)
+        && !matches!(kind, "child_page" | "child_database" | "divider")
+        && !plain.is_empty()
+    {
+        lines
+            .last_mut()
+            .unwrap()
+            .spans
+            .push(Span::styled(" · защищено", muted(&ui.theme)));
+    }
+    if matches!(kind, "heading_2" | "heading_3") {
+        lines.insert(0, Line::default());
+    }
+    Text::from(lines)
+}
+
+fn draw_document(frame: &mut Frame, ui: &mut Ui, area: Rect) {
+    ui.document_rows.clear();
+    let margin = if area.width > 104 {
+        (area.width - 100) / 2
+    } else {
+        2.min(area.width / 8)
+    };
+    let inner = area.inner(Margin::new(margin, 1));
+    if inner.is_empty() {
+        return;
+    }
+    let title = ui
+        .page
+        .as_ref()
+        .map(content::page_title)
+        .unwrap_or_else(|| "Откройте свои заметки".into());
+    frame.render_widget(
+        Paragraph::new(content::terminal_text(&title))
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+        Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(1), 1),
+    );
+    let body = Rect::new(
+        inner.x,
+        inner.y + 2,
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
+    ui.content_area = body;
+    let visible = ui.visible_nodes();
+    if visible.is_empty() {
+        let text = if ui.pending > 0 {
+            "Загрузка страницы…"
+        } else if ui.page.is_some() {
+            "На странице пока нет блоков.\nCtrl+P → Добавить блок — начать заметку."
+        } else {
+            "Ctrl+P — найти страницу по названию или вставить ссылку.\nTab — перейти к закреплённым и недавним страницам."
+        };
+        frame.render_widget(
+            Paragraph::new(text)
+                .wrap(Wrap { trim: false })
+                .style(muted(&ui.theme)),
+            body,
+        );
+        return;
+    }
+    let width = body.width.saturating_sub(2).max(1);
+    let editing_block = ui
+        .editor
+        .as_ref()
+        .filter(|e| matches!(e.target, Target::Block(_)))
+        .map(|e| e.draft_id.clone());
+    let blocks: Vec<_> = visible
+        .iter()
+        .enumerate()
+        .map(|(position, index)| {
+            let node = &ui.nodes[*index];
+            let id = format!("blocks/{}", node.raw["id"].as_str().unwrap_or(""));
+            let editing = editing_block.as_ref() == Some(&id);
+            let paragraph = Paragraph::new(document_text(ui, node, position == ui.selected))
+                .wrap(Wrap { trim: false });
+            let height = if editing {
+                let text = ui.editor.as_ref().unwrap().text();
+                Paragraph::new(text)
+                    .wrap(Wrap { trim: false })
+                    .line_count(width)
+                    .saturating_add(2)
+                    .max(4)
+                    .min(usize::from(body.height).max(1))
+            } else {
+                paragraph.line_count(width).max(1)
+            };
+            (paragraph, height, editing)
+        })
+        .collect();
+    let total: usize = blocks.iter().map(|(_, height, _)| height).sum();
+    ui.document_limit = total.saturating_sub(usize::from(body.height));
+    if ui.follow_selection {
+        let start: usize = blocks.iter().take(ui.selected).map(|(_, h, _)| h).sum();
+        let height = blocks.get(ui.selected).map(|(_, h, _)| *h).unwrap_or(1);
+        if start < ui.document_scroll || start >= ui.document_scroll + usize::from(body.height) {
+            ui.document_scroll = start;
+        } else if height <= usize::from(body.height)
+            && start + height > ui.document_scroll + usize::from(body.height)
+        {
+            ui.document_scroll = start + height - usize::from(body.height);
+        }
+        ui.follow_selection = false;
+    }
+    ui.document_scroll = ui.document_scroll.min(ui.document_limit);
+    let mut offset = 0;
+    for (position, (paragraph, height, editing)) in blocks.into_iter().enumerate() {
+        let end = offset + height;
+        if end > ui.document_scroll && offset < ui.document_scroll + usize::from(body.height) {
+            let clipped = ui.document_scroll.saturating_sub(offset);
+            let y = body.y + offset.saturating_sub(ui.document_scroll) as u16;
+            let shown = (height - clipped).min(usize::from(body.bottom().saturating_sub(y))) as u16;
+            let rect = Rect::new(body.x + 2, y, width, shown);
+            ui.document_rows.push((position, rect));
+            let selected = position == ui.selected;
+            if selected {
+                frame.render_widget(
+                    Block::default()
+                        .borders(Borders::LEFT)
+                        .border_style(if ui.nav_focus {
+                            muted(&ui.theme)
+                        } else {
+                            accent(&ui.theme)
+                        }),
+                    Rect::new(body.x, y, 1, shown),
+                );
+            }
+            if editing {
+                let edit = ui.editor.as_mut().unwrap();
+                frame.render_widget(
+                    EditorView::new(&mut edit.state).wrap(true).theme(
+                        EditorTheme::default()
+                            .hide_status_line()
+                            .selection_style(selection(&ui.theme, true))
+                            .cursor_style(Style::default().add_modifier(Modifier::REVERSED))
+                            .base(theme_style(&ui.theme))
+                            .block(
+                                Block::default()
+                                    .borders(Borders::TOP | Borders::BOTTOM)
+                                    .border_style(accent(&ui.theme))
+                                    .title(" Редактирование · Esc обратно "),
+                            ),
+                    ),
+                    rect,
+                );
+            } else {
+                frame.render_widget(
+                    paragraph
+                        .scroll((clipped.min(u16::MAX as usize) as u16, 0))
+                        .style(if selected {
+                            selection(&ui.theme, !ui.nav_focus)
+                        } else {
+                            Style::default()
+                        }),
+                    rect,
+                );
+            }
+        }
+        offset = end;
+    }
+    if total > usize::from(body.height) {
+        let track = body.height.saturating_sub(1);
+        let thumb = (ui.document_scroll * usize::from(track) / ui.document_limit.max(1)) as u16;
+        frame.render_widget(
+            Paragraph::new("┃").style(muted(&ui.theme)),
+            Rect::new(body.right().saturating_sub(1), body.y + thumb, 1, 1),
+        );
+    }
+}
+
 fn draw_table(frame: &mut Frame, ui: &mut Ui, area: Rect) {
     let grid = ui.grid.as_ref().unwrap();
     let count = (usize::from(area.width.saturating_sub(2)) / usize::from(ui.width + 1)).max(1);
@@ -2174,7 +2721,7 @@ fn draw_table(frame: &mut Frame, ui: &mut Ui, area: Rect) {
     let columns: Vec<_> = grid.columns.iter().skip(start).take(count).collect();
     let header = Row::new(columns.iter().enumerate().map(|(index, name)| {
         Cell::from(content::terminal_text(name)).style(if start + index == grid.column {
-            accent(&ui.theme).add_modifier(Modifier::REVERSED)
+            accent(&ui.theme).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
             Style::default().add_modifier(Modifier::BOLD)
         })
@@ -2195,18 +2742,24 @@ fn draw_table(frame: &mut Frame, ui: &mut Ui, area: Rect) {
     frame.render_stateful_widget(
         Table::new(rows, vec![Constraint::Length(ui.width); columns.len()])
             .header(header)
-            .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-            .block(Block::bordered().title(format!(
-                " {} · e редактор · {}/{} ",
-                content::terminal_text(&grid.name),
-                grid.column + 1,
-                grid.columns.len()
-            ))),
+            .row_highlight_style(selection(&ui.theme, !ui.nav_focus))
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(muted(&ui.theme))
+                    .title(format!(
+                        " {} · e редактор · b доска · {}/{} ",
+                        content::terminal_text(&grid.name),
+                        grid.column + 1,
+                        grid.columns.len()
+                    )),
+            ),
         area,
         &mut ui.table_state,
     );
 }
-fn draw_board(frame: &mut Frame, ui: &Ui, area: Rect) {
+fn draw_board(frame: &mut Frame, ui: &mut Ui, area: Rect) {
+    ui.document_rows.clear();
     let grid = ui.grid.as_ref().unwrap();
     let columns = board_columns(grid);
     let current = grid
@@ -2222,8 +2775,11 @@ fn draw_board(frame: &mut Frame, ui: &Ui, area: Rect) {
         .skip(start)
         .take(visible)
         .collect();
-    let constraints = vec![Constraint::Ratio(1, shown.len().max(1) as u32); shown.len()];
-    let areas = Layout::horizontal(constraints).split(area);
+    let areas = Layout::horizontal(vec![
+        Constraint::Ratio(1, shown.len().max(1) as u32);
+        shown.len()
+    ])
+    .split(area.inner(Margin::new(1, 1)));
     for ((column_index, column), area) in shown.into_iter().zip(areas.iter()) {
         let rows: Vec<_> = grid
             .rows
@@ -2231,44 +2787,93 @@ fn draw_board(frame: &mut Frame, ui: &Ui, area: Rect) {
             .enumerate()
             .filter(|(_, row)| row_column(grid, row, &columns) == column_index)
             .collect();
-        let selected = rows.iter().position(|(index, _)| *index == grid.row);
-        let items: Vec<_> = rows
+        let border = Block::default()
+            .borders(Borders::TOP)
+            .border_style(if current == column_index {
+                accent(&ui.theme)
+            } else {
+                muted(&ui.theme)
+            })
+            .title(content::terminal_text(&format!(
+                " {}  {} ",
+                column.name,
+                rows.len()
+            )));
+        let inside = border.inner(*area).inner(Margin::new(1, 1));
+        frame.render_widget(border, *area);
+        let cards: Vec<_> = rows
             .iter()
             .map(|(index, row)| {
                 let dirty = row["id"]
                     .as_str()
                     .is_some_and(|id| ui.drafts.contains(&format!("pages/{id}")));
-                ListItem::new(format!(
-                    "{} {}",
-                    if *index == grid.row {
-                        ">"
-                    } else if dirty {
-                        "*"
-                    } else {
-                        " "
-                    },
+                let text = format!(
+                    "{}{}",
+                    if dirty { "* " } else { "" },
                     content::terminal_text(&content::page_title(row))
-                ))
+                );
+                let card = Paragraph::new(text).wrap(Wrap { trim: false });
+                let height = card
+                    .line_count(inside.width.saturating_sub(2).max(1))
+                    .max(1)
+                    + 1;
+                (*index, card, height)
             })
             .collect();
-        let mut state = ListState::default();
-        state.select(selected);
-        frame.render_stateful_widget(
-            List::new(items)
-                .block(Block::bordered().title(content::terminal_text(&format!(
-                    "{} ({})",
-                    column.name,
-                    rows.len()
-                ))))
-                .highlight_style(accent(&ui.theme).add_modifier(Modifier::REVERSED)),
-            *area,
-            &mut state,
-        );
+        let selected_end: usize = cards
+            .iter()
+            .take_while(|(index, _, _)| *index != grid.row)
+            .map(|(_, _, h)| *h)
+            .sum::<usize>()
+            + cards
+                .iter()
+                .find(|(index, _, _)| *index == grid.row)
+                .map(|(_, _, h)| *h)
+                .unwrap_or(0);
+        let scroll = if current == column_index {
+            selected_end.saturating_sub(usize::from(inside.height))
+        } else {
+            0
+        };
+        let mut offset = 0;
+        for (index, card, height) in cards {
+            if offset + height > scroll && offset < scroll + usize::from(inside.height) {
+                let clipped = scroll.saturating_sub(offset);
+                let y = inside.y + offset.saturating_sub(scroll) as u16;
+                let shown =
+                    (height - clipped).min(usize::from(inside.bottom().saturating_sub(y))) as u16;
+                let rect = Rect::new(inside.x, y, inside.width, shown);
+                ui.document_rows.push((index, rect));
+                let selected = index == grid.row;
+                frame.render_widget(
+                    card.scroll((clipped.min(u16::MAX as usize) as u16, 0))
+                        .block(
+                            Block::default()
+                                .borders(Borders::LEFT)
+                                .border_style(if selected {
+                                    accent(&ui.theme)
+                                } else {
+                                    muted(&ui.theme)
+                                }),
+                        )
+                        .style(if selected {
+                            selection(&ui.theme, !ui.nav_focus)
+                        } else {
+                            Style::default()
+                        }),
+                    rect,
+                );
+            }
+            offset += height;
+        }
+        if rows.is_empty() {
+            frame.render_widget(Paragraph::new("Нет задач").style(muted(&ui.theme)), inside);
+        }
     }
 }
 fn draw_properties(frame: &mut Frame, ui: &Ui, area: Rect) {
     let value = ui.selected_page().unwrap_or(Value::Null);
-    let mut lines = vec![Line::from("Tab — скрыть свойства")];
+    let mut lines = vec![Line::from("F2 — скрыть свойства")];
     if let Some(properties) = value["properties"].as_object() {
         for (name, value) in properties {
             lines.push(Line::from(content::terminal_text(&format!(
@@ -2292,7 +2897,7 @@ fn draw_properties(frame: &mut Frame, ui: &Ui, area: Rect) {
         area,
     );
 }
-fn draw_overlay(frame: &mut Frame, overlay: &Overlay, theme: &str) {
+fn draw_overlay(frame: &mut Frame, overlay: &Overlay, theme: &str, entries: &[(String, String)]) {
     let full = frame.area();
     let area = Rect::new(
         full.x + 2,
@@ -2300,7 +2905,9 @@ fn draw_overlay(frame: &mut Frame, overlay: &Overlay, theme: &str) {
         full.width.saturating_sub(4),
         full.height.saturating_sub(2),
     );
-    frame.render_widget(Clear, area);
+    if !matches!(overlay, Overlay::Palette { .. }) {
+        frame.render_widget(Clear, area);
+    }
     match overlay {
         Overlay::Help => {
             frame.render_widget(
@@ -2311,20 +2918,55 @@ fn draw_overlay(frame: &mut Frame, overlay: &Overlay, theme: &str) {
                 area,
             );
         }
-        Overlay::Palette(selected) => {
-            let items: Vec<_> = PALETTE
+        Overlay::Palette { selected, query } => {
+            let width = full.width.saturating_sub(4).min(76);
+            let height = full.height.saturating_sub(4).min(18);
+            let popup = Rect::new(
+                full.x + full.width.saturating_sub(width) / 2,
+                full.y + 2,
+                width,
+                height,
+            );
+            frame.render_widget(Clear, popup);
+            let border = Block::bordered()
+                .title(" Страницы и действия ")
+                .border_style(accent(theme))
+                .style(theme_style(theme));
+            let inside = border.inner(popup);
+            frame.render_widget(border, popup);
+            let parts = Layout::vertical([
+                Constraint::Length(2),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .split(inside);
+            frame.render_widget(
+                Paragraph::new(format!(" > {query}")).style(accent(theme)),
+                parts[0],
+            );
+            let items: Vec<_> = entries
                 .iter()
-                .map(|(label, command)| ListItem::new(format!("{label}  :{command}")))
+                .map(|(label, _)| ListItem::new(format!(" {label}")))
                 .collect();
             let mut state = ListState::default();
-            state.select(Some(*selected));
+            state.select(Some((*selected).min(entries.len().saturating_sub(1))));
             frame.render_stateful_widget(
                 List::new(items)
-                    .block(Block::bordered().title(" Команды · Enter выбрать · Esc закрыть "))
-                    .highlight_style(accent(theme).add_modifier(Modifier::REVERSED)),
-                area,
+                    .highlight_symbol("› ")
+                    .highlight_style(selection(theme, true)),
+                parts[1],
                 &mut state,
             );
+            frame.render_widget(
+                Paragraph::new(" Печатайте для поиска · ↑↓ выбрать · Enter · Esc")
+                    .style(muted(theme)),
+                parts[2],
+            );
+            let cursor = Line::from(query.as_str())
+                .width()
+                .saturating_add(3)
+                .min(usize::from(parts[0].width.saturating_sub(1))) as u16;
+            frame.set_cursor_position((parts[0].x + cursor, parts[0].y));
         }
         Overlay::Text {
             title,
@@ -2409,8 +3051,12 @@ fn theme_style(theme: &str) -> Style {
         Style::default()
     } else {
         match theme {
-            "dark" => Style::default().fg(Color::Gray).bg(Color::Black),
-            "light" => Style::default().fg(Color::Black).bg(Color::White),
+            "dark" => Style::default()
+                .fg(Color::Rgb(216, 222, 233))
+                .bg(Color::Rgb(23, 27, 36)),
+            "light" => Style::default()
+                .fg(Color::Rgb(37, 43, 54))
+                .bg(Color::Rgb(250, 249, 245)),
             _ => Style::default(),
         }
     }
@@ -2419,12 +3065,39 @@ fn accent(theme: &str) -> Style {
     if std::env::var_os("NO_COLOR").is_some() {
         Style::default().add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(if theme == "light" {
-            Color::Blue
-        } else {
-            Color::Cyan
+        Style::default().fg(match theme {
+            "light" => Color::Rgb(49, 91, 151),
+            "dark" => Color::Rgb(130, 170, 255),
+            _ => Color::Blue,
         })
     }
+}
+fn muted(theme: &str) -> Style {
+    if std::env::var_os("NO_COLOR").is_some() {
+        Style::default()
+    } else {
+        Style::default().fg(match theme {
+            "light" => Color::Rgb(109, 116, 130),
+            "dark" => Color::Rgb(130, 142, 163),
+            _ => Color::DarkGray,
+        })
+    }
+}
+fn selection(theme: &str, focused: bool) -> Style {
+    if !focused {
+        return Style::default();
+    }
+    if std::env::var_os("NO_COLOR").is_some() {
+        return Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    }
+    match theme {
+        "dark" => Style::default().bg(Color::Rgb(41, 52, 72)),
+        "light" => Style::default().bg(Color::Rgb(224, 232, 244)),
+        _ => Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+    }
+}
+fn nav_selectable(item: &NavItem) -> bool {
+    item.id.is_some() || item.source.is_some()
 }
 fn array_results(value: &Value) -> Result<Vec<Value>> {
     value["results"]
@@ -2684,6 +3357,257 @@ mod tests {
     }
     fn block() -> Value {
         json!({"object":"block","id":"c02fc1d3-db8b-45c5-a222-27595b15aea7","type":"paragraph","paragraph":{"rich_text":[{"type":"text","text":{"content":"Привет"}}]}})
+    }
+    #[tokio::test]
+    async fn wrapped_document_mouse_and_search_launcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::new(
+            Store::open(&dir.path().join("state.sqlite3"), Scope::new("p", "w", "i")).unwrap(),
+            None,
+            true,
+        );
+        let mut long = block();
+        long["paragraph"]["rich_text"][0]["text"]["content"] = json!(format!(
+            "{} КОНЕЦ",
+            "Длинный текст с кириллицей 😀 ".repeat(100)
+        ));
+        let mut second = block();
+        second["id"] = json!("58b15747-ff92-4e6b-94dd-ab080940ef04");
+        second["paragraph"]["rich_text"][0]["text"]["content"] = json!("Следующий блок");
+        let mut ui = Ui::new(HashSet::new());
+        ui.accept(Message {
+            generation: None,
+            write: false,
+            result: Ok(Payload::Document {
+                page: page(),
+                blocks: vec![long, second],
+            }),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut ui, true)).unwrap();
+        assert!(ui.document_limit > 0);
+        ui.scroll_document(isize::MAX);
+        terminal.draw(|frame| draw(frame, &mut ui, true)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("КОНЕЦ"));
+        let (_, rect) = ui
+            .document_rows
+            .iter()
+            .find(|(index, _)| *index == 1)
+            .copied()
+            .unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        ui.event(
+            &app,
+            &tx,
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: rect.x,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ui.selected, 1);
+        let id: PageId = page()["id"].as_str().unwrap().parse().unwrap();
+        ui.nav = vec![
+            NavItem {
+                id: None,
+                source: None,
+                title: "Корни".into(),
+                depth: 0,
+                expanded: false,
+                loaded: true,
+            },
+            NavItem {
+                id: Some(id),
+                source: None,
+                title: "Кириллица".into(),
+                depth: 1,
+                expanded: false,
+                loaded: false,
+            },
+            NavItem {
+                id: None,
+                source: None,
+                title: "Недавние".into(),
+                depth: 0,
+                expanded: false,
+                loaded: true,
+            },
+            NavItem {
+                id: Some(id),
+                source: None,
+                title: "Другая".into(),
+                depth: 1,
+                expanded: false,
+                loaded: false,
+            },
+        ];
+        ui.nav_focus = true;
+        ui.nav_selected = 1;
+        ui.vertical(1);
+        assert_eq!(ui.nav_selected, 3);
+        terminal.draw(|frame| draw(frame, &mut ui, true)).unwrap();
+        ui.event(
+            &app,
+            &tx,
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: ui.nav_area.x,
+                row: ui.nav_area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ui.nav_selected, 3);
+        ui.event(
+            &app,
+            &tx,
+            Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+        )
+        .await
+        .unwrap();
+        ui.event(
+            &app,
+            &tx,
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(&ui.overlay, Some(Overlay::Palette { query, .. }) if query == "q"));
+        ui.event(
+            &app,
+            &tx,
+            Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+        )
+        .await
+        .unwrap();
+        ui.event(
+            &app,
+            &tx,
+            Event::Paste(
+                "https://app.notion.com/p/workspace/b55c9c91384d452b81dbd1ef79372b75".into(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ui.palette_entries().len(), 1);
+        ui.event(
+            &app,
+            &tx,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        )
+        .await
+        .unwrap();
+        assert!(ui.overlay.is_none() && ui.command.is_none());
+        assert!(ui.pending > 0);
+        assert!(ui.generation > 0);
+    }
+    #[tokio::test]
+    async fn direct_edit_save_quit_and_pending_checkboxes() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::new(
+            Store::open(&dir.path().join("state.sqlite3"), Scope::new("p", "w", "i")).unwrap(),
+            None,
+            true,
+        );
+        let mut ui = Ui::new(HashSet::new());
+        ui.accept(Message {
+            generation: None,
+            write: false,
+            result: Ok(Payload::Document {
+                page: page(),
+                blocks: vec![block()],
+            }),
+        });
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        ui.event(
+            &app,
+            &tx,
+            Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ui.editor.as_ref().unwrap().state.mode, EditorMode::Insert);
+        ui.event(&app, &tx, Event::Paste("Новая мысль 😀".into()))
+            .await
+            .unwrap();
+        ui.event(
+            &app,
+            &tx,
+            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+        )
+        .await
+        .unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        ui.receive(&app, message).await.unwrap();
+        assert!(!ui.saving);
+        ui.event(
+            &app,
+            &tx,
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        )
+        .await
+        .unwrap();
+        assert!(ui.quit);
+        let path = "blocks/c02fc1d3-db8b-45c5-a222-27595b15aea7";
+        assert!(
+            app.store.draft(path).await.unwrap().unwrap().local["text"]
+                .as_str()
+                .unwrap()
+                .contains("Новая мысль 😀")
+        );
+        let todo = json!({"object":"block","id":"58b15747-ff92-4e6b-94dd-ab080940ef04","type":"to_do","to_do":{"checked":false,"rich_text":[{"text":{"content":"Задача"}}]}});
+        let mut ui = Ui::new(HashSet::new());
+        ui.accept(Message {
+            generation: None,
+            write: false,
+            result: Ok(Payload::Document {
+                page: page(),
+                blocks: vec![todo],
+            }),
+        });
+        let path = "blocks/58b15747-ff92-4e6b-94dd-ab080940ef04";
+        for checked in [true, false] {
+            ui.event(
+                &app,
+                &tx,
+                Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)),
+            )
+            .await
+            .unwrap();
+            assert_eq!(ui.local_checks.get(path), Some(&checked));
+            assert_eq!(
+                app.store.draft(path).await.unwrap().unwrap().local["to_do"]["checked"],
+                checked
+            );
+        }
+        app.store
+            .put_draft(
+                path,
+                json!({"kind":"block_text"}),
+                json!({"text":"Не терять"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ui.toggle_todo(&app).await.unwrap_err().code, 5);
+        assert_eq!(
+            app.store.draft(path).await.unwrap().unwrap().local["text"],
+            "Не терять"
+        );
+        assert!(app.store.operations().await.unwrap().is_empty());
     }
     #[test]
     fn narrow_unicode_protected_content_and_stale_results() {
@@ -3073,6 +3997,19 @@ mod tests {
         let columns = board_columns(&grid);
         assert_eq!(row_column(&grid, &row, &columns), 1);
         assert_eq!(columns[0].ids[0], "a");
+        grid.rows[0]["properties"]["Title"] = json!({"type":"title","title":[{"text":{"content":"Длинное название задачи должно переноситься целиком КОНЕЦ"}}]});
+        let mut ui = Ui::new(HashSet::new());
+        ui.grid = Some(grid);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut ui, true)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("КОНЕЦ"));
         assert!(property_input("relation", "[{\"id\":\"wrong\"}]").is_err());
         let rich = json!([{"type":"mention","mention":{"type":"user","user":{"id":"b55c9c91-384d-452b-81db-d1ef79372b75"}},"annotations":{"bold":true}}]);
         assert_eq!(

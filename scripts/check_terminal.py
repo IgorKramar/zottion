@@ -36,13 +36,14 @@ with tempfile.TemporaryDirectory(prefix="zottion-pty-") as directory:
     blocks = [{"object": "block", "id": block_id, "type": "paragraph", "has_children": False, "parent": {"page_id": page_id}, "paragraph": {"rich_text": [{"type": "text", "text": {"content": "Исходный текст"}}]}}, {"object": "block", "id": "58b15747-ff92-4e6b-94dd-ab080940ef04", "type": "unsupported", "unsupported": {}, "has_children": False}]
     for kind, key, value in [("resource", f"pages/{page_id}", page), ("resource", f"blocks/{block_id}", blocks[0]), ("list", encoded([f"blocks/{page_id}/children", None, []]), {"object": "list", "results": blocks, "has_more": False, "next_cursor": None})]:
         connection.execute("INSERT INTO snapshots(scope,kind,id,raw,complete,updated) VALUES(?,?,?,?,1,?)", (scope, kind, key, encoded(value), int(time.time())))
+    connection.execute("INSERT INTO snapshots(scope,kind,id,raw,complete,updated) VALUES(?,?,?,?,1,?)", (scope, "navigation", "roots", encoded([{"id":page_id,"title":"Тестовая страница"}]), int(time.time())))
     connection.commit()
 
     def launch(cancel):
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
         before = termios.tcgetattr(slave)
-        child = subprocess.Popen([binary, "--offline", "open", page_id], env=env, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+        child = subprocess.Popen([binary, "--offline"] + (["open", page_id] if cancel else []), env=env, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
         output = bytearray()
         def drain(seconds):
             end = time.monotonic() + seconds
@@ -60,7 +61,7 @@ with tempfile.TemporaryDirectory(prefix="zottion-pty-") as directory:
                     output.extend(data)
         try:
             startup_deadline = time.monotonic() + 5
-            while child.poll() is None and "Тестовая страница" not in output.decode(errors="replace") and time.monotonic() < startup_deadline:
+            while child.poll() is None and "Исходный текст" not in output.decode(errors="replace") and time.monotonic() < startup_deadline:
                 drain(0.1)
             assert child.poll() is None, output.decode(errors="replace")
             assert "Тестовая страница" in output.decode(errors="replace")
@@ -68,18 +69,14 @@ with tempfile.TemporaryDirectory(prefix="zottion-pty-") as directory:
             if cancel:
                 os.kill(child.pid, signal.SIGINT)
             else:
-                os.write(master, b"\r")
-                drain(0.15)
                 os.write(master, b"i")
                 os.write(master, b"\x1b[200~" + "Язык 😀".encode() + b"\x1b[201~")
                 drain(0.2)
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
                 os.kill(child.pid, signal.SIGWINCH)
-                os.write(master, b"\x1b")
-                drain(0.15)
-                os.write(master, b"\x1b")
-                drain(0.15)
-                os.write(master, b":q\r")
+                os.write(master, b"\x13")
+                drain(0.3)
+                os.write(master, b"\x11")
             deadline = time.monotonic() + 5
             while child.poll() is None and time.monotonic() < deadline:
                 drain(0.1)
@@ -97,4 +94,4 @@ with tempfile.TemporaryDirectory(prefix="zottion-pty-") as directory:
     assert "Язык 😀" in draft["text"]
     launch(True)
     connection.close()
-print("PTY: 80x24, Unicode paste, resize, durable draft, quit and SIGINT restore — OK")
+print("PTY: auto-open, i, Ctrl+S/Q, 80x24, Unicode paste, resize, durable draft and SIGINT restore — OK")

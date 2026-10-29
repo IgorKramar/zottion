@@ -25,14 +25,17 @@ import pyte
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--binary", default="target/x86_64-unknown-linux-gnu/release/zottion")
+parser.add_argument("--columns", type=int, default=132)
+parser.add_argument("--rows", type=int, default=24)
+parser.add_argument("--output-dir", type=Path, default=Path(__file__).resolve().parent.parent / "docs/screenshots")
 parser.add_argument("--font", default="/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf")
 args = parser.parse_args()
 binary = str(Path(args.binary).resolve())
-out = Path(__file__).resolve().parent.parent / "docs/screenshots"
+out = args.output_dir
 out.mkdir(parents=True, exist_ok=True)
 page_id = "b55c9c91-384d-452b-81db-d1ef79372b75"
 source_id = "c02fc1d3-db8b-45c5-a222-27595b15aea7"
-columns, rows = 132, 24
+columns, rows = args.columns, args.rows
 
 def encoded(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
@@ -62,12 +65,12 @@ with tempfile.TemporaryDirectory(prefix="zottion-screenshots-") as directory:
                ("to_do", "Связать заметку с задачей"),
                ("to_do", "Закончить начатое и отметить результат"),
                ("heading_2", "Привычный рабочий ритм"),
-               ("bulleted_list_item", "Enter — открыть блок. i — начать писать. Esc — вернуться."),
-               ("bulleted_list_item", "Черновик сохраняется локально. :w отправляет его в Notion."),
+               ("bulleted_list_item", "i — сразу писать. Esc — вернуться к чтению."),
+               ("bulleted_list_item", "Черновик сохраняется локально. Ctrl+S отправляет его в Notion."),
                ("bulleted_list_item", "При конфликте сравнить версии и выбрать решение."),
                ("quote", "Одна мысль. Один блок. Одна точечная правка."),
                ("toggle", "Исследования и решения"),
-               ("callout", "Ctrl+P — команды · :board — задачи · :diff — изменения")]
+               ("callout", "Ctrl+P — страницы и действия · Tab — дерево · Ctrl+Q — выход")]
     blocks = []
     for index, (kind, text) in enumerate(entries):
         payload = {} if kind == "divider" else {"rich_text": rich(text)}
@@ -119,6 +122,8 @@ with tempfile.TemporaryDirectory(prefix="zottion-screenshots-") as directory:
         assert text in "\n".join(screen.display), "\n".join(screen.display)
     colors = {"default": "#cbd5df", "black": "#10151d", "red": "#e78b8b", "green": "#86d9b8", "brown": "#edc98c", "yellow": "#edc98c", "blue": "#8ebcf0", "magenta": "#bfaff0", "cyan": "#8bd5db", "white": "#d9e2ec", "brightblack": "#6e7d90", "brightwhite": "#f1f5f9"}
     font = ImageFont.truetype(args.font, 17)
+    bold_path = Path(args.font.replace("Regular", "Bold"))
+    bold_font = ImageFont.truetype(str(bold_path), 17) if bold_path.is_file() else font
     cell_width, cell_height = round(font.getlength("M")), 24
     def color(value, background=False):
         if value == "default": return "#10151d" if background else colors[value]
@@ -138,12 +143,18 @@ with tempfile.TemporaryDirectory(prefix="zottion-screenshots-") as directory:
                 if cell.reverse: fg,bg=bg,fg
                 left,top = 32+x*cell_width,76+y*cell_height
                 draw.rectangle((left,top,left+cell_width-1,top+cell_height-1),fill=bg)
-                if cell.data and cell.data!=" ": draw.text((left,top),cell.data,font=font,fill=fg,stroke_width=0)
+                if cell.data and cell.data!=" ": draw.text((left,top),cell.data,font=bold_font if cell.bold else font,fill=fg,stroke_width=0)
         image.save(out/name)
     try:
-        wait_text("Рабочая тетрадь")
+        wait_text("Страница загружена")
         os.write(master,b":theme dark\r");drain()
         save("notes.png","zottion · notes")
+        os.write(master,b"i");drain()
+        save("editor.png","zottion · editor")
+        os.write(master,b"\x1b");drain();os.write(master,b"\x1b");drain()
+        os.write(master,b"\x10");drain()
+        save("search.png","zottion · search")
+        os.write(master,b"\x1b");drain()
         os.write(master,f":board {source_id} Status\r".encode());wait_text("Доска")
         save("board.png","zottion · board")
         os.write(master,b":q\r");child.wait(timeout=5)

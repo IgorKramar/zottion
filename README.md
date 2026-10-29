@@ -38,6 +38,15 @@ page properties. Local panel and column settings do not modify shared Notion vie
 
 </details>
 
+<details>
+<summary><strong>Edit in place and find your next page</strong></summary>
+
+![Inline block editing](docs/screenshots/editor.png)
+
+![Page and action search](docs/screenshots/search.png)
+
+</details>
+
 *Screens captured from the application with synthetic data, an offline cache, and
 a custom terminal ANSI palette. No Notion connection was used.*
 
@@ -85,7 +94,8 @@ cargo install --path . --locked
 
 Minimum terminal size: **80 × 24**. Unicode is supported; Nerd Fonts and truecolor
 are optional. Set `NO_COLOR` to disable colors. Themes are `default`, `dark` and
-`light`; `:theme dark` changes the current session.
+`light`; the app starts with the dark theme. `:theme default` uses your terminal's
+colors; `:theme light` switches the current session to light mode.
 
 ## Quick start
 
@@ -158,9 +168,17 @@ empty or a page returns 404, check its connection access in Notion.
 
 ### Notes
 
-Select a block with `j/k`, press Enter, then `i` to write. Text changes are saved
-locally. `:w` publishes loaded drafts on the current screen; `:q` exits while
-retaining unsubmitted drafts. Use `:diff` to inspect versions before publishing.
+On startup, zottion opens the most recent page, falling back to a pinned root.
+Use **Ctrl+P** to filter known pages and actions, paste a Notion page link, or
+choose “Search in Notion” for a title search. Enter opens the selected result.
+Tab switches between the tree and document; tree section headings are skipped.
+
+Select a block with `j/k` and press **i** to write directly in the document.
+Surrounding blocks remain visible, and long text wraps and scrolls. Text changes
+are saved locally. **Ctrl+S** (or `:w`) publishes loaded drafts on the current
+screen; **Ctrl+Q** (or `:q`) exits while retaining unsubmitted drafts. Use `:diff`
+to inspect versions before publishing. Mouse clicks open tree pages and select
+blocks or cards; the wheel scrolls the pane under the pointer.
 
 ```text
 :open PAGE_ID
@@ -182,6 +200,7 @@ retaining unsubmitted drafts. Use `:diff` to inspect versions before publishing.
 
 In a table, `h/l` selects a cell and `e` edits its property. On a board, `h/l`
 selects a column, `j/k` selects a card, and `H/L` changes its status.
+Press `b` to switch between table and board when a status/select property exists.
 Structural commands such as `:append`, `:new` and `:task` execute the requested
 operation immediately when online. Use `:refresh` to reload afterward.
 
@@ -207,12 +226,15 @@ metadata. Script commands never initiate browser login. [CLI contract](docs/cli.
 |:---|:---|
 | `j/k`, arrows | Select blocks, rows or cards |
 | Enter | Open a page or edit a text block |
-| `i`, `v` in EdTUI | Insert / Visual mode |
+| `i` on a block; `v` in EdTUI | Write immediately / Visual mode |
 | Esc, then Esc | Return to Normal mode, then block navigation |
 | `h/l` | Collapse/load children; select table cells or board columns |
-| `Ctrl+W` | Switch navigation/document focus |
-| Tab | Toggle properties |
-| `Ctrl+P`, `?` | Command palette / help |
+| Tab, `Ctrl+W` | Switch navigation/document focus |
+| F2 | Toggle properties |
+| `Ctrl+P`, `/` | Filter pages and actions; paste a page URL |
+| PgUp/PgDn, `Ctrl+U/D` | Scroll a page / half a page |
+| `Ctrl+S`, `Ctrl+Q` | Publish / exit with durable drafts |
+| `Ctrl+R`, `?` | Refresh / help |
 | `:w`, `:q`, `:wq` | Publish / exit with drafts / publish and exit |
 | `:diff`, `:conflict` | Inspect changes and resolve a conflict explicitly |
 | `:drafts`, `:apply ID` | Inspect drafts / explicitly submit one |
