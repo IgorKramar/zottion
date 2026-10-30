@@ -80,7 +80,7 @@ with tempfile.TemporaryDirectory(prefix="zottion-pty-") as directory:
                 drain(0.1)
             assert child.poll() is not None, "TUI не завершился: " + output.decode(errors="replace")[-5000:]
             assert child.returncode == (130 if cancel else 0), output.decode(errors="replace")
-            assert termios.tcgetattr(slave) == before, "Режим терминала не восстановлен"
+            assert termios.tcgetattr(slave) == before, f"Режим терминала не восстановлен: {before!r} -> {termios.tcgetattr(slave)!r}"
         finally:
             if child.poll() is None:
                 child.kill()
