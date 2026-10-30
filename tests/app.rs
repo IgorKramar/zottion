@@ -163,6 +163,16 @@ fn formatting_and_property_ids_preserve_identity() {
 async fn incompatible_and_invalid_drafts_never_publish_or_overwrite() {
     let dir = tempfile::tempdir().unwrap();
     let app = App::new(store(&dir), None, true);
+    let protected = json!({"object":"block","id":ID,"type":"bookmark","bookmark":{"url":"https://example.com"}});
+    assert_eq!(
+        app.save_block(protected.clone(), "blocked".into())
+            .await
+            .unwrap_err()
+            .code,
+        7
+    );
+    assert!(app.store.drafts().await.unwrap().is_empty());
+    assert!(app.store.operations().await.unwrap().is_empty());
     let path = format!("blocks/{ID}");
     let draft = app
         .stage_block(block("base"), "local".into())
@@ -180,6 +190,17 @@ async fn incompatible_and_invalid_drafts_never_publish_or_overwrite() {
         .unwrap_err()
         .code,
         5
+    );
+    assert_eq!(
+        app.store.draft(&draft.id).await.unwrap().unwrap().local["text"],
+        "local"
+    );
+    assert_eq!(
+        app.stage_block(protected, "blocked".into())
+            .await
+            .unwrap_err()
+            .code,
+        7
     );
     assert_eq!(
         app.store.draft(&draft.id).await.unwrap().unwrap().local["text"],

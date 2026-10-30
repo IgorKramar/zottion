@@ -259,6 +259,11 @@ impl App {
 
     /// Persist editor text even if a rich-text boundary prevents publishing it.
     pub async fn stage_block(&self, block: Value, text: String) -> Result<Draft> {
+        if !content::TEXT_BLOCKS.contains(&content::block_type(&block)) {
+            return Err(Error::unsupported(
+                "Этот блок защищён от текстового редактирования",
+            ));
+        }
         let id = block["id"]
             .as_str()
             .ok_or_else(|| Error::input("У блока нет ID"))?

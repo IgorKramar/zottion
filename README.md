@@ -51,8 +51,9 @@ page properties. Local panel and column settings do not modify shared Notion vie
 a custom terminal ANSI palette. No Notion connection was used.*
 
 > **Early development.** The source is public; there is no stable release yet.
-> The v0.1 implementation passes local checks. Real Notion/OAuth, native keychain,
-> and clean-system acceptance are tracked in the [verification report](docs/verification.md).
+> Notes, tasks, conflicts and crash recovery have been tested against real Notion.
+> OAuth, macOS Keychain and clean-system installation still need acceptance.
+> See the [verification report](docs/verification.md) for results and limits.
 
 ## What's inside
 

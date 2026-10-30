@@ -10,6 +10,7 @@ use crossterm::{
     },
     execute,
 };
+use edtui::actions::{Execute, InsertChar, LineBreak};
 use edtui::{EditorEventHandler, EditorMode, EditorState, EditorTheme, EditorView, Lines};
 use futures_util::StreamExt;
 use ratatui::{
@@ -1676,11 +1677,21 @@ impl Ui {
                 return Ok(());
             }
             let before = edit.text();
-            let event = match event {
-                Event::Paste(text) => Event::Paste(content::terminal_text(&text)),
-                other => other,
-            };
-            edit.handler.on_event(event, &mut edit.state);
+            match event {
+                Event::Paste(text) if edit.state.mode == EditorMode::Insert => {
+                    for c in content::terminal_text(&text).chars() {
+                        if c == '\n' {
+                            LineBreak(1).execute(&mut edit.state);
+                        } else {
+                            InsertChar(c).execute(&mut edit.state);
+                        }
+                    }
+                }
+                Event::Paste(text) => edit
+                    .handler
+                    .on_event(Event::Paste(content::terminal_text(&text)), &mut edit.state),
+                other => edit.handler.on_event(other, &mut edit.state),
+            }
             if edit.text() != before {
                 self.persist_editor(app).await?;
             }
@@ -1768,7 +1779,7 @@ impl Ui {
                         if key.code == KeyCode::Char('i')
                             && let Some(edit) = &mut self.editor
                         {
-                            edit.state.mode = EditorMode::Insert;
+                            edit.handler.on_event(Event::Key(key), &mut edit.state);
                         }
                     }
                     KeyCode::Enter => {
@@ -3558,6 +3569,40 @@ mod tests {
         ui.event(&app, &tx, Event::Paste("Новая мысль 😀".into()))
             .await
             .unwrap();
+        assert_eq!(ui.editor.as_ref().unwrap().text(), "Новая мысль 😀Привет");
+        ui.event(&app, &tx, Event::Paste("\nВторая строка\n".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            ui.editor.as_ref().unwrap().text(),
+            "Новая мысль 😀\nВторая строка\nПривет"
+        );
+        ui.event(
+            &app,
+            &tx,
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        )
+        .await
+        .unwrap();
+        ui.event(
+            &app,
+            &tx,
+            Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ui.editor.as_ref().unwrap().text(), "Привет");
+        ui.event(
+            &app,
+            &tx,
+            Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            ui.editor.as_ref().unwrap().text(),
+            "Новая мысль 😀\nВторая строка\nПривет"
+        );
         ui.event(
             &app,
             &tx,
