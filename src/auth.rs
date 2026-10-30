@@ -6,12 +6,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
+    ffi::OsStr,
     fs::{File, OpenOptions},
-    io::Write,
+    io::{IsTerminal, Write},
     path::{Path, PathBuf},
+    process::{ExitStatus, Stdio},
     time::Duration,
 };
-use tokio::time::{Instant, sleep};
+use tokio::{
+    io::AsyncReadExt,
+    process::Command,
+    time::{Instant, sleep, timeout_at},
+};
 use uuid::Uuid;
 
 pub struct Options {
@@ -276,6 +282,163 @@ fn server_url(value: &str) -> Result<Url> {
     url.set_path("/");
     Ok(url)
 }
+fn login_server(
+    explicit: Option<&str>,
+    environment: Option<&str>,
+    remembered: Option<&str>,
+) -> Result<Option<Url>> {
+    explicit
+        .or(environment)
+        .or(remembered)
+        .map(server_url)
+        .transpose()
+}
+fn notion_cli_error() -> Error {
+    Error::new(
+        3,
+        "Не удалось выполнить вход через официальный Notion CLI (ntn). Установка: https://developers.notion.com/cli/get-started/installation; повторите вход или используйте auth login --token-stdin",
+    )
+}
+fn check_notion_cli_status(status: ExitStatus) -> Result<()> {
+    let code = status.code();
+    #[cfg(unix)]
+    let code = {
+        use std::os::unix::process::ExitStatusExt;
+        code.or_else(|| status.signal().map(|signal| 128 + signal))
+    };
+    match code {
+        Some(0) => Ok(()),
+        Some(130) => Err(Error::new(130, "Вход отменён")),
+        _ => Err(notion_cli_error()),
+    }
+}
+fn notion_cli_command(executable: &OsStr, workspace: Option<&str>) -> Command {
+    let mut command = Command::new(executable);
+    command
+        .kill_on_drop(true)
+        .stdin(Stdio::inherit())
+        .env("NOTION_KEYRING", "1")
+        .env("NOTION_ENV", "prod");
+    for name in [
+        "NOTION_API_TOKEN",
+        "NOTION_BASE_URL",
+        "NOTION_API_BASE_URL",
+        "NOTION_WORKERS_CONFIG_FILE",
+        "NOTION_WORKSPACE_ID",
+    ] {
+        command.env_remove(name);
+    }
+    if let Some(workspace) = workspace {
+        command.env("NOTION_WORKSPACE_ID", workspace);
+    }
+    command
+}
+fn helper_stdout() -> Result<Stdio> {
+    // ntn diagnostics must not corrupt zottion's versioned JSON on stdout.
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsFd;
+        std::io::stderr()
+            .as_fd()
+            .try_clone_to_owned()
+            .map(Stdio::from)
+            .map_err(|_| notion_cli_error())
+    }
+    #[cfg(not(unix))]
+    {
+        Err(Error::unsupported(
+            "Браузерный вход через Notion CLI поддерживается на Linux/macOS",
+        ))
+    }
+}
+#[cfg(unix)]
+struct LoginTerminal(rustix::termios::Termios);
+#[cfg(unix)]
+impl LoginTerminal {
+    fn capture() -> Result<Self> {
+        rustix::termios::tcgetattr(rustix::stdio::stdin())
+            .map(Self)
+            .map_err(|_| Error::new(1, "Не удалось сохранить режим терминала"))
+    }
+}
+#[cfg(unix)]
+impl Drop for LoginTerminal {
+    fn drop(&mut self) {
+        // A killed helper cannot restore the terminal itself.
+        let _ = rustix::termios::tcsetattr(
+            rustix::stdio::stdin(),
+            rustix::termios::OptionalActions::Now,
+            &self.0,
+        );
+        let _ = crossterm::execute!(std::io::stderr(), crossterm::cursor::Show);
+    }
+}
+async fn notion_cli_token(
+    executable: &OsStr,
+    options: &Options,
+    no_browser: bool,
+) -> Result<String> {
+    let deadline = Instant::now() + options.timeout;
+    // Local workspace aliases are not native Notion workspace IDs.
+    let native_workspace = options
+        .workspace
+        .as_deref()
+        .filter(|value| Uuid::parse_str(value).is_ok());
+    #[cfg(unix)]
+    let _terminal = if !no_browser && std::io::stdin().is_terminal() {
+        Some(LoginTerminal::capture()?)
+    } else {
+        None
+    };
+    let steps: &[&[&str]] = if no_browser {
+        &[&["login", "--no-browser"], &["login", "poll"]]
+    } else {
+        &[&["login"]]
+    };
+    for args in steps {
+        let status = timeout_at(
+            deadline,
+            notion_cli_command(executable, native_workspace)
+                .args(*args)
+                .stdout(helper_stdout()?)
+                .stderr(Stdio::inherit())
+                .status(),
+        )
+        .await
+        .map_err(|_| Error::new(6, "Срок входа через Notion CLI истёк; повторите auth login"))?
+        .map_err(|_| notion_cli_error())?;
+        check_notion_cli_status(status)?;
+    }
+    let mut child = notion_cli_command(executable, native_workspace)
+        .args(["auth", "token", "--plain"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| notion_cli_error())?;
+    let token = timeout_at(deadline, async {
+        let mut bytes = Vec::new();
+        child
+            .stdout
+            .take()
+            .ok_or_else(notion_cli_error)?
+            .take(8193)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|_| notion_cli_error())?;
+        if bytes.len() > 8192 {
+            return Err(notion_cli_error());
+        }
+        check_notion_cli_status(child.wait().await.map_err(|_| notion_cli_error())?)?;
+        let token = String::from_utf8(bytes).map_err(|_| notion_cli_error())?;
+        if token.trim().is_empty() || !token.trim().bytes().all(|b| b.is_ascii_graphic()) {
+            return Err(notion_cli_error());
+        }
+        Ok(token)
+    })
+    .await
+    .map_err(|_| Error::new(6, "Срок входа через Notion CLI истёк; повторите auth login"))??;
+    Ok(token)
+}
 fn random() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
@@ -401,13 +564,59 @@ async fn ensure_keyring() -> Result<()> {
     .await
     .map_err(|_| keyring_error())?
 }
-pub async fn login(options: &Options, server: &str, no_browser: bool) -> Result<Value> {
+pub async fn login(options: &Options, server: Option<&str>, no_browser: bool) -> Result<Value> {
     validate(options)?;
     if options.offline {
         return Err(Error::input("Вход недоступен с --offline"));
     }
-    let server = server_url(server)?;
     let paths = paths()?;
+    let config = read_config(&paths.config)?;
+    let selected_workspace = workspace(&config, options);
+    let remembered = config
+        .profiles
+        .get(&options.profile)
+        .and_then(|profile| profile.workspaces.get(&selected_workspace))
+        .and_then(|workspace| workspace.server.as_deref());
+    let environment = match std::env::var("ZOTTION_AUTH_SERVER") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(_) => {
+            return Err(Error::input(
+                "ZOTTION_AUTH_SERVER должен быть строкой UTF-8",
+            ));
+        }
+    };
+    let Some(server) = login_server(server, environment.as_deref(), remembered)? else {
+        if env_token().is_some() {
+            return Err(Error::input(
+                "Уберите NOTION_TOKEN из окружения перед браузерным входом",
+            ));
+        }
+        if options
+            .workspace
+            .as_ref()
+            .is_some_and(|value| Uuid::parse_str(value).is_err())
+        {
+            return Err(Error::input(
+                "Для браузерного входа --workspace должен быть реальным UUID workspace Notion",
+            ));
+        }
+        // Keep helper selection and credential destination fixed throughout the login.
+        let selected_options = Options {
+            profile: options.profile.clone(),
+            workspace: Some(selected_workspace),
+            offline: options.offline,
+            timeout: options.timeout,
+        };
+        let _lock = lock(paths.state_dir.join("auth-notion-cli.lock")).await?;
+        let token = notion_cli_token(
+            OsStr::new("ntn"),
+            &selected_options,
+            no_browser || !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal(),
+        )
+        .await?;
+        return login_token(&selected_options, token).await;
+    };
     let _lock = lock(
         paths
             .state_dir
@@ -569,7 +778,7 @@ pub async fn login_token(options: &Options, token: String) -> Result<Value> {
 fn oauth_server(credential: &Credential) -> Result<Url> {
     if credential.server.is_empty() {
         return Err(Error::unsupported(
-            "API-токен обновляется и отзывается в Notion; новый токен сохраните через auth login --token-stdin",
+            "Токен этого способа отзывается в Notion; для нового входа используйте auth login или auth login --token-stdin",
         ));
     }
     server_url(&credential.server)
@@ -742,6 +951,161 @@ pub async fn logout(options: &Options, revoke: bool) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn login_server_precedence_and_validation() {
+        let explicit = Some("https://explicit.example.com");
+        let environment = Some("https://env.example.com");
+        let remembered = Some("https://remembered.example.com");
+        for (a, b, c, expected) in [
+            (
+                explicit,
+                environment,
+                remembered,
+                "https://explicit.example.com/",
+            ),
+            (None, environment, remembered, "https://env.example.com/"),
+            (None, None, remembered, "https://remembered.example.com/"),
+        ] {
+            assert_eq!(login_server(a, b, c).unwrap().unwrap().as_str(), expected);
+        }
+        assert!(login_server(None, None, None).unwrap().is_none());
+        for invalid in [
+            "",
+            "https://app.notion.com/p/profile",
+            "http://example.com",
+            "https://user:password@example.com",
+            "https://example.com/?token=secret",
+        ] {
+            let error = login_server(Some(invalid), environment, remembered).unwrap_err();
+            assert_eq!(error.code, 2);
+            assert!(!error.message.contains(invalid) || invalid.is_empty());
+        }
+        assert_eq!(
+            login_server(Some("http://127.0.0.1:9393"), None, None)
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            "http://127.0.0.1:9393/"
+        );
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_helper_sequence_limits_environment_and_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("fake-ntn");
+        let mut options = Options {
+            profile: "test".into(),
+            workspace: None,
+            offline: false,
+            timeout: Duration::from_secs(2),
+        };
+        let command = notion_cli_command(executable.as_os_str(), None);
+        let environment: BTreeMap<_, _> = command.as_std().get_envs().collect();
+        for name in [
+            "NOTION_API_TOKEN",
+            "NOTION_BASE_URL",
+            "NOTION_API_BASE_URL",
+            "NOTION_WORKERS_CONFIG_FILE",
+            "NOTION_WORKSPACE_ID",
+        ] {
+            assert_eq!(environment[OsStr::new(name)], None);
+        }
+        assert_eq!(
+            environment[OsStr::new("NOTION_ENV")],
+            Some(OsStr::new("prod"))
+        );
+        assert_eq!(
+            environment[OsStr::new("NOTION_KEYRING")],
+            Some(OsStr::new("1"))
+        );
+        let script = |body: &str| {
+            std::fs::write(
+                &executable,
+                format!("#!/bin/sh\nset -eu\nprintf '%s\\n' \"$*\" >> \"$0.log\"\n{body}\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        };
+        script("[ \"$*\" != 'auth token --plain' ] || printf synthetic-token");
+        assert_eq!(
+            notion_cli_token(executable.as_os_str(), &options, true)
+                .await
+                .unwrap(),
+            "synthetic-token"
+        );
+        assert_eq!(
+            std::fs::read_to_string(executable.with_extension("log")).unwrap(),
+            "login --no-browser\nlogin poll\nauth token --plain\n"
+        );
+        std::fs::remove_file(executable.with_extension("log")).unwrap();
+        assert_eq!(
+            notion_cli_token(executable.as_os_str(), &options, false)
+                .await
+                .unwrap(),
+            "synthetic-token"
+        );
+        assert_eq!(
+            std::fs::read_to_string(executable.with_extension("log")).unwrap(),
+            "login\nauth token --plain\n"
+        );
+        options.workspace = Some("default".into());
+        script(
+            "[ \"${NOTION_WORKSPACE_ID+x}\" = '' ]\n[ \"$*\" != 'auth token --plain' ] || printf synthetic-token",
+        );
+        assert_eq!(
+            notion_cli_token(executable.as_os_str(), &options, true)
+                .await
+                .unwrap(),
+            "synthetic-token"
+        );
+        options.workspace = None;
+        for body in [
+            "exit 17",
+            "[ \"$*\" != 'login poll' ]",
+            "[ \"$*\" != 'auth token --plain' ] || { printf private-export-error >&2; exit 17; }",
+            "[ \"$*\" != 'auth token --plain' ] || printf '%8193s' x",
+            "[ \"$*\" != 'auth token --plain' ] || printf 'two tokens'",
+        ] {
+            script(body);
+            let error = notion_cli_token(executable.as_os_str(), &options, true)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, 3);
+            assert!(!error.message.contains("private-export-error"));
+        }
+        script("exit 130");
+        assert_eq!(
+            notion_cli_token(executable.as_os_str(), &options, true)
+                .await
+                .unwrap_err()
+                .code,
+            130
+        );
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            check_notion_cli_status(ExitStatus::from_raw(2))
+                .unwrap_err()
+                .code,
+            130
+        );
+        options.timeout = Duration::from_millis(150);
+        script("/bin/sleep 0.1\n[ \"$*\" != 'auth token --plain' ] || printf synthetic-token");
+        assert_eq!(
+            notion_cli_token(executable.as_os_str(), &options, true)
+                .await
+                .unwrap_err()
+                .code,
+            6
+        );
+        assert_eq!(
+            notion_cli_token(dir.path().join("missing").as_os_str(), &options, true)
+                .await
+                .unwrap_err()
+                .code,
+            3
+        );
+    }
     #[test]
     fn configuration_and_token_rotation_preserve_identity() {
         let dir = tempfile::tempdir().unwrap();

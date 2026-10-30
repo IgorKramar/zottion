@@ -18,7 +18,8 @@ workspace и права конкретной connection проверяются �
 | Реальные views | list/get/query, TUI table/board | Сохраняются query ID и признак неполного ответа; общий view не редактируется |
 | Поиск | Названия API, содержимое загруженного через FTS5 | Не является полным реестром workspace |
 | Офлайн | Кэш, черновики, явная отправка после проверки | Нет автоматической очереди |
-| OAuth | Одноразовый handoff, refresh/revoke, keychain | Нужны свои public connection и сервер |
+| Браузерный вход | Официальный ntn login/poll/export → проверка API → keychain zottion | Без нашего сервера; нужен ntn и полное членство в workspace |
+| Дополнительный OAuth | Одноразовая выдача, refresh/revoke, keychain | Только для владельцев своих public connection и сервера |
 | API-токен | Вход через stdin, проверка `/users/me`, keychain | Connection и доступ к страницам настраиваются в Notion; обновление/отзыв — там же |
 | CLI | stdin, версии JSON, курсоры, exit codes, профили, completion | Без скрытого браузерного входа |
 

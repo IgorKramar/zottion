@@ -11,6 +11,7 @@ import select
 import signal
 import sqlite3
 import struct
+import sys
 import subprocess
 import tempfile
 import termios
@@ -24,6 +25,14 @@ page_id = "b55c9c91-384d-452b-81db-d1ef79372b75"
 block_id = "c02fc1d3-db8b-45c5-a222-27595b15aea7"
 def encoded(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+def terminal_mode(fd):
+    attributes = termios.tcgetattr(fd)
+    if sys.platform == "darwin":
+        # XNU sets PENDIN when returning to ICANON; it is transient kernel state.
+        # https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/tty.c
+        attributes[3] &= ~termios.PENDIN
+    return attributes
 
 with tempfile.TemporaryDirectory(prefix="zottion-pty-") as directory:
     root = Path(directory)
@@ -42,7 +51,7 @@ with tempfile.TemporaryDirectory(prefix="zottion-pty-") as directory:
     def launch(cancel):
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
-        before = termios.tcgetattr(slave)
+        before = terminal_mode(slave)
         child = subprocess.Popen([binary, "--offline"] + (["open", page_id] if cancel else []), env=env, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
         output = bytearray()
         def drain(seconds):
@@ -65,7 +74,7 @@ with tempfile.TemporaryDirectory(prefix="zottion-pty-") as directory:
                 drain(0.1)
             assert child.poll() is None, output.decode(errors="replace")
             assert "Тестовая страница" in output.decode(errors="replace")
-            assert termios.tcgetattr(slave) != before
+            assert terminal_mode(slave) != before
             if cancel:
                 os.kill(child.pid, signal.SIGINT)
             else:
@@ -78,9 +87,9 @@ with tempfile.TemporaryDirectory(prefix="zottion-pty-") as directory:
             deadline = time.monotonic() + 5
             while child.poll() is None and time.monotonic() < deadline:
                 drain(0.1)
-            assert child.poll() is not None, "TUI не завершился"
+            assert child.poll() is not None, "TUI не завершился: " + output.decode(errors="replace")[-5000:]
             assert child.returncode == (130 if cancel else 0), output.decode(errors="replace")
-            assert termios.tcgetattr(slave) == before, "Режим терминала не восстановлен"
+            assert terminal_mode(slave) == before, f"Режим терминала не восстановлен: {before!r} -> {terminal_mode(slave)!r}"
         finally:
             if child.poll() is None:
                 child.kill()
@@ -91,5 +100,37 @@ with tempfile.TemporaryDirectory(prefix="zottion-pty-") as directory:
     draft = json.loads(connection.execute("SELECT local FROM drafts WHERE id=?", (f"blocks/{block_id}",)).fetchone()[0])
     assert "Язык 😀" in draft["text"]
     launch(True)
+
+    # A killed interactive helper cannot run its own terminal cleanup.
+    helpers = root / "bin"
+    helpers.mkdir()
+    helper = helpers / "ntn"
+    helper.write_text("#!/bin/sh\n/bin/stty raw -echo\nprintf '\\033[?25l'\nexec /bin/sleep 3\n")
+    helper.chmod(0o755)
+    auth_env = dict(env, PATH=str(helpers) + os.pathsep + os.defpath)
+    auth_env.pop("NOTION_TOKEN", None)
+    auth_env.pop("ZOTTION_AUTH_SERVER", None)
+    for cancel in [False, True]:
+        master, slave = pty.openpty()
+        before = terminal_mode(slave)
+        child = subprocess.Popen([binary, "--timeout", "1", "auth", "login", "--json"], env=auth_env, stdin=slave, stderr=slave, stdout=subprocess.PIPE)
+        try:
+            if cancel:
+                deadline = time.monotonic() + 3
+                while terminal_mode(slave) == before and child.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert terminal_mode(slave) != before, "Helper не включил raw mode"
+                os.kill(child.pid, signal.SIGINT)
+            stdout, _ = child.communicate(timeout=5)
+            assert child.returncode == (130 if cancel else 6), stdout
+            assert not stdout, "Ошибка должна идти в stderr"
+            assert terminal_mode(slave) == before, f"NTN cancel={cancel}: режим {before!r} -> {terminal_mode(slave)!r}"
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+            termios.tcsetattr(slave, termios.TCSANOW, before)
+            os.close(master)
+            os.close(slave)
     connection.close()
-print("PTY: auto-open, i, Ctrl+S/Q, 80x24, Unicode paste, resize, durable draft and SIGINT restore — OK")
+print("PTY: auto-open, editing, save/quit, resize, drafts, SIGINT and NTN timeout restore — OK")

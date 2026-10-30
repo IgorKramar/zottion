@@ -11,7 +11,7 @@
 Notes · tasks · Vim editing · a scriptable CLI
 
 [![CI](https://github.com/IgorKramar/zottion/actions/workflows/ci.yml/badge.svg)](https://github.com/IgorKramar/zottion/actions/workflows/ci.yml)
-![Status](https://img.shields.io/badge/status-early_development-edc98c?style=flat-square)
+[![Release](https://img.shields.io/github/v/release/IgorKramar/zottion?style=flat-square)](https://github.com/IgorKramar/zottion/releases/latest)
 [![MIT](https://img.shields.io/badge/license-MIT-86d9b8?style=flat-square)](LICENSE)
 ![Rust](https://img.shields.io/badge/Rust-1.91-e0af68?style=flat-square&logo=rust&logoColor=white)
 ![Platforms](https://img.shields.io/badge/platform-Linux_/_macOS-8ebcf0?style=flat-square)
@@ -50,9 +50,9 @@ page properties. Local panel and column settings do not modify shared Notion vie
 *Screens captured from the application with synthetic data, an offline cache, and
 a custom terminal ANSI palette. No Notion connection was used.*
 
-> **Early development.** The source is public; there is no stable release yet.
+> **First public release: v0.1.0.** Interfaces may change before 1.0.
 > Notes, tasks, conflicts and crash recovery have been tested against real Notion.
-> OAuth, macOS Keychain and clean-system installation still need acceptance.
+> macOS Keychain, optional self-hosted OAuth and clean-system installation still need acceptance.
 > See the [verification report](docs/verification.md) for results and limits.
 
 ## What's inside
@@ -65,22 +65,43 @@ a custom terminal ANSI palette. No Notion connection was used.*
 | Views & search | Read existing views; search Notion titles or locally loaded content |
 | Local state | Scoped SQLite cache, FTS5 search, durable drafts and an operation journal |
 | Automation | Versioned JSON, stdin, cursors, profiles, exit codes and shell completion |
-| Authentication | API token or browser OAuth through a self-hosted service; OS keychain storage |
+| Authentication | Browser login through official ntn, API token, optional self-hosted OAuth; OS keychain |
 
 Unknown blocks are displayed and protected. Files, comments, schema editing and
 other view layouts are outside v0.1. See the [capability matrix](docs/capabilities.md).
 
 ## Install
 
-Build from source with **Rust 1.91 or newer** and Git:
+Download [v0.1.0](https://github.com/IgorKramar/zottion/releases/tag/v0.1.0) for your platform. Rust is only needed when building from source.
+
+| Platform | Download |
+|:---|:---|
+| Linux x86_64 | [tar.gz](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-x86_64-unknown-linux-gnu.tar.gz) · [SHA-256](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256) |
+| Linux ARM64 | [tar.gz](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-aarch64-unknown-linux-gnu.tar.gz) · [SHA-256](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-aarch64-unknown-linux-gnu.tar.gz.sha256) |
+| macOS Intel | [tar.gz](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-x86_64-apple-darwin.tar.gz) · [SHA-256](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-x86_64-apple-darwin.tar.gz.sha256) |
+| macOS Apple Silicon | [tar.gz](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-aarch64-apple-darwin.tar.gz) · [SHA-256](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-aarch64-apple-darwin.tar.gz.sha256) |
+
+For example, after downloading the Linux x86_64 archive and its checksum:
 
 ```sh
-cargo install --git https://github.com/IgorKramar/zottion --locked zottion
+sha256sum -c zottion-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf zottion-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+mkdir -p ~/.local/bin
+install -m 755 zottion-v0.1.0-x86_64-unknown-linux-gnu/zottion ~/.local/bin/zottion
+zottion --version
+```
+
+On macOS, verify with `shasum -a 256 -c FILE.sha256`. Keep `~/.local/bin` in `PATH`.
+Browser login also requires the [official Notion CLI](https://developers.notion.com/cli/get-started/installation).
+
+Alternatively, build from source with **Rust 1.91 or newer** and Git:
+
+```sh
+cargo install --git https://github.com/IgorKramar/zottion --tag v0.1.0 --locked zottion
 zottion --help
 ```
 
-Cargo usually installs to `~/.cargo/bin`; keep it in `PATH`. Linux and macOS are
-the target platforms. There is no published binary release yet.
+Cargo usually installs to `~/.cargo/bin`; keep it in `PATH`.
 
 <details>
 <summary>Build a local checkout</summary>
@@ -100,9 +121,24 @@ colors; `:theme light` switches the current session to light mode.
 
 ## Quick start
 
-Choose one of three authentication paths. **An API token saved in the OS keychain
-is the simplest option for your own workspace.** There is no hosted zottion OAuth
-service yet; a Notion page or workspace URL cannot be used as `--server`.
+**Browser login needs no zottion server:** it uses the official Notion CLI
+`ntn`. Credentials stay in the OS keychain; zottion makes subsequent REST
+requests directly.
+
+### Browser login
+
+Install the [official Notion CLI](https://developers.notion.com/cli/get-started/installation), then:
+
+```sh
+unset NOTION_TOKEN
+zottion auth login
+zottion auth status --json
+```
+
+Confirm that the verification code matches in your browser. The helper exits
+after login. Use `zottion auth login --no-browser` over SSH or with another browser.
+The official CLI requires full workspace membership; guests/restricted members
+can use an API token with suitable permissions. Tested with `ntn 0.23.25` on Linux.
 
 ### API token: save once
 
@@ -142,20 +178,11 @@ This does not save the token. It lasts for the current shell and takes precedenc
 over keychain credentials. Use `unset NOTION_TOKEN` to return to the saved login.
 Never put the token in a command argument, shell startup file or committed file.
 
-### Browser OAuth: self-hosted
+### Optional OAuth: your own connection
 
-Browser login needs a configured zottion OAuth service and a registered Notion
-OAuth connection. `--server` is the **root URL of that service**.
-
-```sh
-zottion --timeout 300 auth login --server https://YOUR_AUTH_HOST
-zottion auth status --json
-zottion open PAGE_ID_OR_NOTION_URL
-```
-
-See [self-hosted OAuth](docs/oauth.md) for the server setup, callback and token
-rotation. OAuth tokens are saved in the OS keychain too. Your connection must
-have access to the pages you use.
+Owners of their own OAuth service can explicitly pass `--server URL`, the
+service's root URL rather than a Notion page. The project needs no shared paid
+service. See [authentication details](docs/oauth.md) for the protocol and limits.
 
 After either login path:
 

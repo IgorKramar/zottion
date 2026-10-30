@@ -2,11 +2,12 @@
 
 Автор: Igor Kramar. Общие флаги можно указывать до и после подкоманды:
 `--json`, `--profile NAME`, `--workspace ID`, `--timeout SECONDS`, `--offline`.
-Справка конкретной команды: `zottion COMMAND --help`.
+Справка конкретной команды: `zottion COMMAND --help`. По умолчанию `--timeout`
+равен 30 секундам, для браузерного `auth login` — 300.
 
 | Группа | Команды |
 |---|---|
-| auth | login --token-stdin или login --server URL [--no-browser], status, refresh, logout [--revoke] |
+| auth | login [--server URL] [--no-browser] или login --token-stdin, status, refresh, logout [--revoke] |
 | page | get [--content], create --parent ID или --data-source ID, title, move --parent ID, trash --yes, restore, favorite, pin, recent |
 | page property | get --property ID [--all], set --property NAME_OR_ID --value-json JSON или --file FILE |
 | block | get, children, update --text/--file/--patch-file, append --kind TYPE --text/--file или --blocks-file, format, check --checked true/false, trash, restore, move (явный код 7) |

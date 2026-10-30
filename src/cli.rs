@@ -26,8 +26,9 @@ pub struct Cli {
     pub profile: String,
     #[arg(long, global = true)]
     pub workspace: Option<String>,
-    #[arg(long,global=true,default_value="30",value_parser=clap::value_parser!(u64).range(1..=3600))]
-    pub timeout: u64,
+    /// Срок запроса: 30 секунд; для браузерного auth login — 300.
+    #[arg(long,global=true,value_parser=clap::value_parser!(u64).range(1..=3600))]
+    pub timeout: Option<u64>,
     #[arg(long, global = true)]
     pub offline: bool,
     #[command(subcommand)]
@@ -79,13 +80,10 @@ pub enum Command {
 }
 #[derive(Subcommand)]
 pub enum AuthCommand {
+    /// Войти через официальный ntn; --server выбирает собственный OAuth-сервис.
     Login {
-        /// Корневой URL OAuth-сервиса zottion, не адрес страницы Notion.
-        #[arg(
-            long,
-            required_unless_present = "token_stdin",
-            conflicts_with = "token_stdin"
-        )]
+        /// Необязательный OAuth-сервис; по умолчанию вход через официальный ntn.
+        #[arg(long, conflicts_with = "token_stdin")]
         server: Option<String>,
         /// Проверить API-токен из stdin и сохранить в системном keychain.
         #[arg(long)]
@@ -331,7 +329,21 @@ impl Cli {
             profile: self.profile.clone(),
             workspace: self.workspace.clone(),
             offline: self.offline,
-            timeout: Duration::from_secs(self.timeout),
+            timeout: Duration::from_secs(self.timeout.unwrap_or({
+                if matches!(
+                    self.command,
+                    Some(Command::Auth {
+                        command: AuthCommand::Login {
+                            token_stdin: false,
+                            ..
+                        }
+                    })
+                ) {
+                    300
+                } else {
+                    30
+                }
+            })),
         }
     }
     pub async fn run(&self) -> Result<(Option<Value>, String)> {
@@ -360,14 +372,7 @@ impl Cli {
                             .map_err(|_| Error::input("Не удалось прочитать API-токен из stdin"))?;
                         auth::login_token(&options, token).await?
                     } else {
-                        auth::login(
-                            &options,
-                            server.as_deref().ok_or_else(|| {
-                                Error::input("Укажите --server или --token-stdin")
-                            })?,
-                            *no_browser,
-                        )
-                        .await?
+                        auth::login(&options, server.as_deref(), *no_browser).await?
                     }
                 }
                 AuthCommand::Status => auth::status(&options).await?,
@@ -762,7 +767,22 @@ mod tests {
         );
         assert!(Cli::try_parse_from(["zottion", "--timeout", "0", "search", "x"]).is_err());
         assert!(Cli::try_parse_from(["zottion", "auth", "login", "--token-stdin"]).is_ok());
-        assert!(Cli::try_parse_from(["zottion", "auth", "login"]).is_err());
+        let login = Cli::try_parse_from(["zottion", "auth", "login"]).unwrap();
+        assert_eq!(login.options().timeout, Duration::from_secs(300));
+        assert_eq!(
+            Cli::try_parse_from(["zottion", "auth", "login", "--token-stdin"])
+                .unwrap()
+                .options()
+                .timeout,
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            Cli::try_parse_from(["zottion", "auth", "login", "--timeout", "5"])
+                .unwrap()
+                .options()
+                .timeout,
+            Duration::from_secs(5)
+        );
         assert!(
             Cli::try_parse_from([
                 "zottion",
