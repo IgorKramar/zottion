@@ -11,7 +11,7 @@
 Notes · tasks · Vim editing · a scriptable CLI
 
 [![CI](https://github.com/IgorKramar/zottion/actions/workflows/ci.yml/badge.svg)](https://github.com/IgorKramar/zottion/actions/workflows/ci.yml)
-![Status](https://img.shields.io/badge/status-early_development-edc98c?style=flat-square)
+[![Release](https://img.shields.io/github/v/release/IgorKramar/zottion?style=flat-square)](https://github.com/IgorKramar/zottion/releases/latest)
 [![MIT](https://img.shields.io/badge/license-MIT-86d9b8?style=flat-square)](LICENSE)
 ![Rust](https://img.shields.io/badge/Rust-1.91-e0af68?style=flat-square&logo=rust&logoColor=white)
 ![Platforms](https://img.shields.io/badge/platform-Linux_/_macOS-8ebcf0?style=flat-square)
@@ -50,7 +50,7 @@ page properties. Local panel and column settings do not modify shared Notion vie
 *Screens captured from the application with synthetic data, an offline cache, and
 a custom terminal ANSI palette. No Notion connection was used.*
 
-> **Early development.** The source is public; there is no stable release yet.
+> **First public release: v0.1.0.** Interfaces may change before 1.0.
 > Notes, tasks, conflicts and crash recovery have been tested against real Notion.
 > macOS Keychain, optional self-hosted OAuth and clean-system installation still need acceptance.
 > See the [verification report](docs/verification.md) for results and limits.
@@ -72,15 +72,36 @@ other view layouts are outside v0.1. See the [capability matrix](docs/capabiliti
 
 ## Install
 
-Build from source with **Rust 1.91 or newer** and Git:
+Download [v0.1.0](https://github.com/IgorKramar/zottion/releases/tag/v0.1.0) for your platform. Rust is only needed when building from source.
+
+| Platform | Download |
+|:---|:---|
+| Linux x86_64 | [tar.gz](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-x86_64-unknown-linux-gnu.tar.gz) · [SHA-256](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256) |
+| Linux ARM64 | [tar.gz](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-aarch64-unknown-linux-gnu.tar.gz) · [SHA-256](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-aarch64-unknown-linux-gnu.tar.gz.sha256) |
+| macOS Intel | [tar.gz](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-x86_64-apple-darwin.tar.gz) · [SHA-256](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-x86_64-apple-darwin.tar.gz.sha256) |
+| macOS Apple Silicon | [tar.gz](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-aarch64-apple-darwin.tar.gz) · [SHA-256](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-aarch64-apple-darwin.tar.gz.sha256) |
+
+For example, after downloading the Linux x86_64 archive and its checksum:
 
 ```sh
-cargo install --git https://github.com/IgorKramar/zottion --locked zottion
+sha256sum -c zottion-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf zottion-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+mkdir -p ~/.local/bin
+install -m 755 zottion-v0.1.0-x86_64-unknown-linux-gnu/zottion ~/.local/bin/zottion
+zottion --version
+```
+
+On macOS, verify with `shasum -a 256 -c FILE.sha256`. Keep `~/.local/bin` in `PATH`.
+Browser login also requires the [official Notion CLI](https://developers.notion.com/cli/get-started/installation).
+
+Alternatively, build from source with **Rust 1.91 or newer** and Git:
+
+```sh
+cargo install --git https://github.com/IgorKramar/zottion --tag v0.1.0 --locked zottion
 zottion --help
 ```
 
-Cargo usually installs to `~/.cargo/bin`; keep it in `PATH`. Linux and macOS are
-the target platforms. There is no published binary release yet.
+Cargo usually installs to `~/.cargo/bin`; keep it in `PATH`.
 
 <details>
 <summary>Build a local checkout</summary>

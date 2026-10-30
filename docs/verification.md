@@ -3,7 +3,8 @@
 30 октября 2026 года. Автор: Igor Kramar.
 
 Реализация находится в Cargo workspace `zottion` и `zottion-auth-service`.
-Тегированного релиза и production-развёртывания не выполнялось.
+Отчёт фиксирует проверки при подготовке [v0.1.0](https://github.com/IgorKramar/zottion/releases/tag/v0.1.0).
+Основной вход не требует production-развёртывания собственного сервиса.
 
 ## Локальные результаты
 

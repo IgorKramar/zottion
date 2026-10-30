@@ -11,7 +11,7 @@
 Заметки · задачи · Vim-редактор · CLI для скриптов
 
 [![CI](https://github.com/IgorKramar/zottion/actions/workflows/ci.yml/badge.svg)](https://github.com/IgorKramar/zottion/actions/workflows/ci.yml)
-![Статус](https://img.shields.io/badge/status-early_development-edc98c?style=flat-square)
+[![Release](https://img.shields.io/github/v/release/IgorKramar/zottion?style=flat-square)](https://github.com/IgorKramar/zottion/releases/latest)
 [![MIT](https://img.shields.io/badge/license-MIT-86d9b8?style=flat-square)](LICENSE)
 ![Rust](https://img.shields.io/badge/Rust-1.91-e0af68?style=flat-square&logo=rust&logoColor=white)
 ![Платформы](https://img.shields.io/badge/platform-Linux_/_macOS-8ebcf0?style=flat-square)
@@ -50,15 +50,40 @@ REST API, редактирует блоки по ID и сохраняет чер
 *Снимки получены из настоящего приложения с демонстрационными данными,
 офлайн-кэшем и настроенной ANSI-палитрой терминала. Подключение к Notion не использовалось.*
 
-> **Ранняя версия.** Исходный код опубликован; стабильного релиза пока нет.
+> **Первый публичный релиз: v0.1.0.** До 1.0 интерфейсы могут меняться.
 > Заметки, задачи, конфликты и восстановление проверены на настоящем Notion.
 > Keychain macOS, дополнительный self-hosted OAuth и чистые установки ещё требуют проверки.
 > Результаты и ограничения — в [отчёте](docs/verification.md).
 
 ## Установка и запуск
 
+Скачай [v0.1.0](https://github.com/IgorKramar/zottion/releases/tag/v0.1.0) для своей платформы. Rust нужен только для сборки из исходников.
+
+| Платформа | Скачать |
+|:---|:---|
+| Linux x86_64 | [tar.gz](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-x86_64-unknown-linux-gnu.tar.gz) · [SHA-256](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256) |
+| Linux ARM64 | [tar.gz](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-aarch64-unknown-linux-gnu.tar.gz) · [SHA-256](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-aarch64-unknown-linux-gnu.tar.gz.sha256) |
+| macOS Intel | [tar.gz](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-x86_64-apple-darwin.tar.gz) · [SHA-256](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-x86_64-apple-darwin.tar.gz.sha256) |
+| macOS Apple Silicon | [tar.gz](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-aarch64-apple-darwin.tar.gz) · [SHA-256](https://github.com/IgorKramar/zottion/releases/download/v0.1.0/zottion-v0.1.0-aarch64-apple-darwin.tar.gz.sha256) |
+
+Например, после скачивания Linux x86_64-архива и его контрольной суммы:
+
 ```sh
-cargo install --git https://github.com/IgorKramar/zottion --locked zottion
+sha256sum -c zottion-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf zottion-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+mkdir -p ~/.local/bin
+install -m 755 zottion-v0.1.0-x86_64-unknown-linux-gnu/zottion ~/.local/bin/zottion
+zottion --version
+```
+
+На macOS проверяй сумму через `shasum -a 256 -c FILE.sha256`.
+Каталог `~/.local/bin` должен быть в `PATH`. Для браузерного входа отдельно
+установи [официальный Notion CLI](https://developers.notion.com/cli/get-started/installation).
+
+Либо собери из исходников с Rust 1.91 или новее:
+
+```sh
+cargo install --git https://github.com/IgorKramar/zottion --tag v0.1.0 --locked zottion
 zottion --help
 zottion
 ```
