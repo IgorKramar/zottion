@@ -76,6 +76,7 @@ fn build(config: Config, base: &str) -> Result<Router, String> {
         }),
     };
     Ok(Router::new()
+        .route("/health", get(|| async { Json(json!({"status":"ok"})) }))
         .route("/sessions", post(start))
         .route("/callback", get(callback_handler))
         .route("/sessions/{id}/result", post(result))
@@ -376,6 +377,13 @@ mod tests {
             status,
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         )
+    }
+    #[tokio::test]
+    async fn health_contains_no_credentials_or_sessions() {
+        let app = router(config()).unwrap();
+        let (status, body) = call(&app, "GET", "/health", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({"status":"ok"}));
     }
     #[tokio::test]
     async fn real_callback_handoff_rejects_wrong_state_verifier_and_replay() {

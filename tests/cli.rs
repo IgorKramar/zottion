@@ -111,3 +111,49 @@ fn cli_stdin_json_drafts_profiles_and_exit_codes() {
         2
     );
 }
+
+#[test]
+fn oauth_server_configuration_is_checked_before_keychain() {
+    let dir = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["auth", "login", "--json"],
+        vec![
+            "auth",
+            "login",
+            "--server",
+            "https://example.com/profile",
+            "--json",
+        ],
+    ] {
+        let result = command(&dir)
+            .env_remove("NOTION_TOKEN")
+            .env(
+                "ZOTTION_AUTH_SERVER",
+                "https://user:private-password@example.com",
+            )
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(2));
+        assert!(result.stdout.is_empty());
+        let error = String::from_utf8(result.stderr).unwrap();
+        assert!(!error.contains("private-password"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&error).unwrap()["error"]["code"],
+            2
+        );
+    }
+    std::fs::create_dir_all(dir.path().join("config")).unwrap();
+    std::fs::write(dir.path().join("config/config.toml"),"[profiles.work]\nselected_workspace = 'test'\n[profiles.work.workspaces.test]\nidentity = 'fixture'\nserver = 'http://remote.example.com'\nkeyring = false\n").unwrap();
+    let result = command(&dir)
+        .env_remove("NOTION_TOKEN")
+        .env_remove("ZOTTION_AUTH_SERVER")
+        .args(["--profile", "work", "auth", "login", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&result.stderr).unwrap()["error"]["code"],
+        2
+    );
+}

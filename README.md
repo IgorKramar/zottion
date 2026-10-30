@@ -145,16 +145,19 @@ Never put the token in a command argument, shell startup file or committed file.
 ### Browser OAuth: self-hosted
 
 Browser login needs a configured zottion OAuth service and a registered Notion
-OAuth connection. `--server` is the **root URL of that service**.
+OAuth connection. Set `ZOTTION_AUTH_SERVER` or pass `--server` with the
+**root URL of that service**.
 
 ```sh
-zottion --timeout 300 auth login --server https://YOUR_AUTH_HOST
+ZOTTION_AUTH_SERVER=https://YOUR_AUTH_HOST zottion auth login
 zottion auth status --json
 zottion open PAGE_ID_OR_NOTION_URL
 ```
 
-See [self-hosted OAuth](docs/oauth.md) for the server setup, callback and token
-rotation. OAuth tokens are saved in the OS keychain too. Your connection must
+After a successful OAuth login, the server is remembered: run `zottion auth login`
+to sign in again. Browser login waits up to five minutes by default.
+See [self-hosted OAuth](docs/oauth.md) for Render deployment without your own
+domain, callback and token rotation. A public hosted server is not deployed yet. OAuth tokens are saved in the OS keychain too. Your connection must
 have access to the pages you use.
 
 After either login path:

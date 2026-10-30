@@ -118,15 +118,19 @@ zottion auth status --json
 ### Браузерный OAuth: свой сервис
 
 Нужен запущенный OAuth-сервис zottion и зарегистрированная OAuth connection
-Notion. `--server` — **корневой адрес этого сервиса**, а не адрес Notion:
+Notion. Адрес задаётся через `ZOTTION_AUTH_SERVER` или `--server` — это
+**корневой адрес сервиса**, а не адрес Notion:
 
 ```sh
-zottion --timeout 300 auth login --server https://auth.example.org
+ZOTTION_AUTH_SERVER=https://auth.example.org zottion auth login
 zottion auth status --json
 zottion open PAGE_ID_OR_NOTION_URL
 ```
 
-Запуск сервиса, callback и ротация описаны в [OAuth](docs/oauth.md).
+После успешного OAuth-входа адрес запоминается: следующий вход — просто
+`zottion auth login`. Ожидание браузера по умолчанию — до пяти минут.
+Запуск сервиса на Render без покупки домена, callback и ротация описаны в
+[OAuth](docs/oauth.md). Постоянный публичный сервер пока не развёрнут.
 OAuth-токены также сохраняются в системном keychain. Страницы должны быть
 доступны этой connection.
 

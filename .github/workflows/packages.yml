@@ -2,6 +2,8 @@ name: packages
 on: workflow_dispatch
 permissions:
   contents: read
+env:
+  ZOTTION_DEFAULT_AUTH_SERVER: ${{ vars.ZOTTION_AUTH_SERVER }}
 jobs:
   package:
     strategy:

@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: zottion-auth
+    runtime: rust
+    plan: 0.5c-512mb
+    numInstances: 1
+    autoDeployTrigger: "off"
+    buildCommand: cargo build --release --locked -p zottion-auth-service
+    startCommand: ./target/release/zottion-auth-service
+    healthCheckPath: /health
+    envVars:
+      - key: RUSTUP_TOOLCHAIN
+        value: 1.91.0
+      - key: ZOTTION_OAUTH_BIND
+        value: 0.0.0.0:10000
+      - key: NOTION_CLIENT_ID
+        sync: false
+      - key: NOTION_CLIENT_SECRET
+        sync: false
+      - key: ZOTTION_OAUTH_CALLBACK_URL
+        sync: false

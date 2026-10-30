@@ -276,6 +276,16 @@ fn server_url(value: &str) -> Result<Url> {
     url.set_path("/");
     Ok(url)
 }
+fn login_server(
+    explicit: Option<&str>,
+    environment: Option<&str>,
+    remembered: Option<&str>,
+    default: Option<&str>,
+) -> Result<Url> {
+    let value = explicit.or(environment).or(remembered).or(default.filter(|value| !value.is_empty()))
+        .ok_or_else(|| Error::new(3, "Публичный OAuth-сервис ещё не настроен. Задайте ZOTTION_AUTH_SERVER или --server; для личного входа доступен auth login --token-stdin"))?;
+    server_url(value)
+}
 fn random() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
@@ -401,13 +411,34 @@ async fn ensure_keyring() -> Result<()> {
     .await
     .map_err(|_| keyring_error())?
 }
-pub async fn login(options: &Options, server: &str, no_browser: bool) -> Result<Value> {
+pub async fn login(options: &Options, server: Option<&str>, no_browser: bool) -> Result<Value> {
     validate(options)?;
     if options.offline {
         return Err(Error::input("Вход недоступен с --offline"));
     }
-    let server = server_url(server)?;
     let paths = paths()?;
+    let config = read_config(&paths.config)?;
+    let selected_workspace = workspace(&config, options);
+    let remembered = config
+        .profiles
+        .get(&options.profile)
+        .and_then(|profile| profile.workspaces.get(&selected_workspace))
+        .and_then(|workspace| workspace.server.as_deref());
+    let environment = match std::env::var("ZOTTION_AUTH_SERVER") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(_) => {
+            return Err(Error::input(
+                "ZOTTION_AUTH_SERVER должен быть строкой UTF-8",
+            ));
+        }
+    };
+    let server = login_server(
+        server,
+        environment.as_deref(),
+        remembered,
+        option_env!("ZOTTION_DEFAULT_AUTH_SERVER"),
+    )?;
     let _lock = lock(
         paths
             .state_dir
@@ -742,6 +773,60 @@ pub async fn logout(options: &Options, revoke: bool) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn login_server_precedence_and_validation() {
+        let explicit = Some("https://explicit.example.com");
+        let environment = Some("https://env.example.com");
+        let remembered = Some("https://remembered.example.com");
+        let default = Some("https://default.example.com");
+        for (a, b, c, d, expected) in [
+            (
+                explicit,
+                environment,
+                remembered,
+                default,
+                "https://explicit.example.com/",
+            ),
+            (
+                None,
+                environment,
+                remembered,
+                default,
+                "https://env.example.com/",
+            ),
+            (
+                None,
+                None,
+                remembered,
+                default,
+                "https://remembered.example.com/",
+            ),
+            (None, None, None, default, "https://default.example.com/"),
+        ] {
+            assert_eq!(login_server(a, b, c, d).unwrap().as_str(), expected);
+        }
+        assert_eq!(
+            login_server(None, None, None, Some("")).unwrap_err().code,
+            3
+        );
+        for invalid in [
+            "",
+            "https://app.notion.com/p/profile",
+            "http://example.com",
+            "https://user:password@example.com",
+            "https://example.com/?token=secret",
+        ] {
+            let error = login_server(Some(invalid), None, None, default).unwrap_err();
+            assert_eq!(error.code, 2);
+            assert!(!error.message.contains(invalid) || invalid.is_empty());
+        }
+        assert_eq!(
+            login_server(Some("http://127.0.0.1:9393"), None, None, None)
+                .unwrap()
+                .as_str(),
+            "http://127.0.0.1:9393/"
+        );
+    }
     #[test]
     fn configuration_and_token_rotation_preserve_identity() {
         let dir = tempfile::tempdir().unwrap();
