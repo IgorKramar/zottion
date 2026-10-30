@@ -351,31 +351,25 @@ fn helper_stdout() -> Result<Stdio> {
         ))
     }
 }
-struct LoginTerminal(String);
+#[cfg(unix)]
+struct LoginTerminal(rustix::termios::Termios);
+#[cfg(unix)]
 impl LoginTerminal {
     fn capture() -> Result<Self> {
-        let output = std::process::Command::new("/bin/stty")
-            .arg("-g")
-            .stdin(Stdio::inherit())
-            .stderr(Stdio::null())
-            .output()?;
-        if !output.status.success() {
-            return Err(Error::new(1, "Не удалось сохранить режим терминала"));
-        }
-        let mode = String::from_utf8(output.stdout)
-            .map_err(|_| Error::new(1, "Некорректный режим терминала"))?;
-        Ok(Self(mode.trim().to_owned()))
+        rustix::termios::tcgetattr(rustix::stdio::stdin())
+            .map(Self)
+            .map_err(|_| Error::new(1, "Не удалось сохранить режим терминала"))
     }
 }
+#[cfg(unix)]
 impl Drop for LoginTerminal {
     fn drop(&mut self) {
         // A killed helper cannot restore the terminal itself.
-        let _ = std::process::Command::new("/bin/stty")
-            .arg(&self.0)
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = rustix::termios::tcsetattr(
+            rustix::stdio::stdin(),
+            rustix::termios::OptionalActions::Now,
+            &self.0,
+        );
         let _ = crossterm::execute!(std::io::stderr(), crossterm::cursor::Show);
     }
 }
@@ -390,6 +384,7 @@ async fn notion_cli_token(
         .workspace
         .as_deref()
         .filter(|value| Uuid::parse_str(value).is_ok());
+    #[cfg(unix)]
     let _terminal = if !no_browser && std::io::stdin().is_terminal() {
         Some(LoginTerminal::capture()?)
     } else {

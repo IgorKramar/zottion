@@ -115,7 +115,7 @@ with tempfile.TemporaryDirectory(prefix="zottion-pty-") as directory:
             stdout, _ = child.communicate(timeout=5)
             assert child.returncode == (130 if cancel else 6), stdout
             assert not stdout, "Ошибка должна идти в stderr"
-            assert termios.tcgetattr(slave) == before, "NTN отмена/timeout оставили терминал в raw mode"
+            assert termios.tcgetattr(slave) == before, f"NTN cancel={cancel}: режим {before!r} -> {termios.tcgetattr(slave)!r}"
         finally:
             if child.poll() is None:
                 child.kill()
