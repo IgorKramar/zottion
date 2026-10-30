@@ -648,9 +648,17 @@ async fn view_query_deadline_includes_post_and_returns_partial() {
     let url = format!("http://{}/v1/", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
         let mut requests = Vec::new();
-        for body in [
-            json!({"object":"view_query","id":ID,"results":[{"id":"a"}],"has_more":true,"next_cursor":"second"}),
-            json!({"object":"view_query","results":[{"id":"b"}],"has_more":false,"next_cursor":null}),
+        // Leave room for CI scheduling: each reply fits the 2.5s timeout,
+        // but both replies together exceed the shared query deadline.
+        for (delay, body) in [
+            (
+                Duration::from_secs(1),
+                json!({"object":"view_query","id":ID,"results":[{"id":"a"}],"has_more":true,"next_cursor":"second"}),
+            ),
+            (
+                Duration::from_secs(2),
+                json!({"object":"view_query","results":[{"id":"b"}],"has_more":false,"next_cursor":null}),
+            ),
         ] {
             let (mut stream, _) = listener.accept().unwrap();
             stream
@@ -659,7 +667,7 @@ async fn view_query_deadline_includes_post_and_returns_partial() {
             let mut bytes = [0; 65536];
             let size = stream.read(&mut bytes).unwrap();
             requests.push(String::from_utf8_lossy(&bytes[..size]).to_string());
-            std::thread::sleep(Duration::from_millis(150));
+            std::thread::sleep(delay);
             let body = body.to_string();
             let _ = write!(
                 stream,
@@ -671,7 +679,7 @@ async fn view_query_deadline_includes_post_and_returns_partial() {
     });
     let app = App::new(
         store(&dir),
-        Some(Client::with_base_url("test".into(), Duration::from_millis(250), &url).unwrap()),
+        Some(Client::with_base_url("test".into(), Duration::from_millis(2500), &url).unwrap()),
         false,
     );
     let error = app.query_view(ID.parse().unwrap(), true).await.unwrap_err();
