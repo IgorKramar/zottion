@@ -52,7 +52,7 @@ a custom terminal ANSI palette. No Notion connection was used.*
 
 > **Early development.** The source is public; there is no stable release yet.
 > Notes, tasks, conflicts and crash recovery have been tested against real Notion.
-> OAuth, macOS Keychain and clean-system installation still need acceptance.
+> macOS Keychain, optional self-hosted OAuth and clean-system installation still need acceptance.
 > See the [verification report](docs/verification.md) for results and limits.
 
 ## What's inside
@@ -65,7 +65,7 @@ a custom terminal ANSI palette. No Notion connection was used.*
 | Views & search | Read existing views; search Notion titles or locally loaded content |
 | Local state | Scoped SQLite cache, FTS5 search, durable drafts and an operation journal |
 | Automation | Versioned JSON, stdin, cursors, profiles, exit codes and shell completion |
-| Authentication | API token or browser OAuth through a self-hosted service; OS keychain storage |
+| Authentication | Browser login through official ntn, API token, optional self-hosted OAuth; OS keychain |
 
 Unknown blocks are displayed and protected. Files, comments, schema editing and
 other view layouts are outside v0.1. See the [capability matrix](docs/capabilities.md).
@@ -100,9 +100,24 @@ colors; `:theme light` switches the current session to light mode.
 
 ## Quick start
 
-Choose one of three authentication paths. **An API token saved in the OS keychain
-is the simplest option for your own workspace.** There is no hosted zottion OAuth
-service yet; a Notion page or workspace URL cannot be used as `--server`.
+**Browser login needs no zottion server:** it uses the official Notion CLI
+`ntn`. Credentials stay in the OS keychain; zottion makes subsequent REST
+requests directly.
+
+### Browser login
+
+Install the [official Notion CLI](https://developers.notion.com/cli/get-started/installation), then:
+
+```sh
+unset NOTION_TOKEN
+zottion auth login
+zottion auth status --json
+```
+
+Confirm that the verification code matches in your browser. The helper exits
+after login. Use `zottion auth login --no-browser` over SSH or with another browser.
+The official CLI requires full workspace membership; guests/restricted members
+can use an API token with suitable permissions. Tested with `ntn 0.23.25` on Linux.
 
 ### API token: save once
 
@@ -142,23 +157,11 @@ This does not save the token. It lasts for the current shell and takes precedenc
 over keychain credentials. Use `unset NOTION_TOKEN` to return to the saved login.
 Never put the token in a command argument, shell startup file or committed file.
 
-### Browser OAuth: self-hosted
+### Optional OAuth: your own connection
 
-Browser login needs a configured zottion OAuth service and a registered Notion
-OAuth connection. Set `ZOTTION_AUTH_SERVER` or pass `--server` with the
-**root URL of that service**.
-
-```sh
-ZOTTION_AUTH_SERVER=https://YOUR_AUTH_HOST zottion auth login
-zottion auth status --json
-zottion open PAGE_ID_OR_NOTION_URL
-```
-
-After a successful OAuth login, the server is remembered: run `zottion auth login`
-to sign in again. Browser login waits up to five minutes by default.
-See [self-hosted OAuth](docs/oauth.md) for Render deployment without your own
-domain, callback and token rotation. A public hosted server is not deployed yet. OAuth tokens are saved in the OS keychain too. Your connection must
-have access to the pages you use.
+Owners of their own OAuth service can explicitly pass `--server URL`, the
+service's root URL rather than a Notion page. The project needs no shared paid
+service. See [authentication details](docs/oauth.md) for the protocol and limits.
 
 After either login path:
 

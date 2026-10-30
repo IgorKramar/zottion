@@ -22,7 +22,7 @@ name = f"zottion-v{version}-{args.target}"
 archive = out / f"{name}.tar.gz"
 with tarfile.open(archive, "w:gz") as tar:
     tar.add(binary, arcname=f"{name}/zottion")
-    for file in ["LICENSE", "README.md", "README.ru.md", "CONTRIBUTING.md", "SECURITY.md", "ARCHITECTURE.md", "render.yaml", "assets", "docs"]:
+    for file in ["LICENSE", "README.md", "README.ru.md", "CONTRIBUTING.md", "SECURITY.md", "ARCHITECTURE.md", "assets", "docs"]:
         tar.add(root / file, arcname=f"{name}/{file}")
 digest = hashlib.sha256(archive.read_bytes()).hexdigest()
 archive.with_suffix(archive.suffix + ".sha256").write_text(f"{digest}  {archive.name}\n")

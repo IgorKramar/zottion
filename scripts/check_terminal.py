@@ -78,7 +78,7 @@ with tempfile.TemporaryDirectory(prefix="zottion-pty-") as directory:
             deadline = time.monotonic() + 5
             while child.poll() is None and time.monotonic() < deadline:
                 drain(0.1)
-            assert child.poll() is not None, "TUI не завершился"
+            assert child.poll() is not None, "TUI не завершился: " + output.decode(errors="replace")[-5000:]
             assert child.returncode == (130 if cancel else 0), output.decode(errors="replace")
             assert termios.tcgetattr(slave) == before, "Режим терминала не восстановлен"
         finally:
@@ -91,5 +91,37 @@ with tempfile.TemporaryDirectory(prefix="zottion-pty-") as directory:
     draft = json.loads(connection.execute("SELECT local FROM drafts WHERE id=?", (f"blocks/{block_id}",)).fetchone()[0])
     assert "Язык 😀" in draft["text"]
     launch(True)
+
+    # A killed interactive helper cannot run its own terminal cleanup.
+    helpers = root / "bin"
+    helpers.mkdir()
+    helper = helpers / "ntn"
+    helper.write_text("#!/bin/sh\n/bin/stty raw -echo\nprintf '\\033[?25l'\nexec /bin/sleep 3\n")
+    helper.chmod(0o755)
+    auth_env = dict(env, PATH=str(helpers) + os.pathsep + os.defpath)
+    auth_env.pop("NOTION_TOKEN", None)
+    auth_env.pop("ZOTTION_AUTH_SERVER", None)
+    for cancel in [False, True]:
+        master, slave = pty.openpty()
+        before = termios.tcgetattr(slave)
+        child = subprocess.Popen([binary, "--timeout", "1", "auth", "login", "--json"], env=auth_env, stdin=slave, stderr=slave, stdout=subprocess.PIPE)
+        try:
+            if cancel:
+                deadline = time.monotonic() + 3
+                while termios.tcgetattr(slave) == before and child.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert termios.tcgetattr(slave) != before, "Helper не включил raw mode"
+                os.kill(child.pid, signal.SIGINT)
+            stdout, _ = child.communicate(timeout=5)
+            assert child.returncode == (130 if cancel else 6), stdout
+            assert not stdout, "Ошибка должна идти в stderr"
+            assert termios.tcgetattr(slave) == before, "NTN отмена/timeout оставили терминал в raw mode"
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+            termios.tcsetattr(slave, termios.TCSANOW, before)
+            os.close(master)
+            os.close(slave)
     connection.close()
-print("PTY: auto-open, i, Ctrl+S/Q, 80x24, Unicode paste, resize, durable draft and SIGINT restore — OK")
+print("PTY: auto-open, editing, save/quit, resize, drafts, SIGINT and NTN timeout restore — OK")

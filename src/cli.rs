@@ -80,8 +80,9 @@ pub enum Command {
 }
 #[derive(Subcommand)]
 pub enum AuthCommand {
+    /// Войти через официальный ntn; --server выбирает собственный OAuth-сервис.
     Login {
-        /// Корневой URL OAuth-сервиса zottion, не адрес страницы Notion.
+        /// Необязательный OAuth-сервис; по умолчанию вход через официальный ntn.
         #[arg(long, conflicts_with = "token_stdin")]
         server: Option<String>,
         /// Проверить API-токен из stdin и сохранить в системном keychain.

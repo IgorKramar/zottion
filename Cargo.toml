@@ -14,7 +14,7 @@ description = "Notion TUI and CLI with durable drafts"
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
-crossterm = { version = "=0.29.0", features = ["event-stream"] }
+crossterm = { version = "=0.29.0", features = ["event-stream", "use-dev-tty"] }
 dirs = "6"
 edtui = { version = "=0.11.7", default-features = false, features = ["mouse-support"] }
 fs2 = "0.4"

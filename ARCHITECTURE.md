@@ -1,6 +1,6 @@
 # Архитектура zottion
 
-Обновлено: 29 октября 2026 года. Автор: Igor Kramar.
+Обновлено: 30 октября 2026 года. Автор: Igor Kramar.
 
 Один Cargo workspace: `zottion` (библиотека и бинарник) и `zottion-auth-service`.
 Приняты Rust, официальный REST API `2026-03-11`, Vim по умолчанию, Linux/macOS,
@@ -47,15 +47,27 @@ Connection SQLite принадлежит отдельному потоку с о
 
 ## Вход и поставка
 
-OAuth-сервис обменивает коды/refresh tokens, хранит короткие одноразовые сеансы
-в памяти и не проксирует содержимое. Секрет public connection только на сервере.
-Клиент получает пару токенов по verifier и хранит её одной записью keychain.
-Для CI предусмотрен NOTION_TOKEN; открытый файл не подменяет keychain.
+Основной браузерный вход запускает официальный `ntn` как временный локальный
+процесс: `login` → при необходимости `login poll` → `auth token --plain`.
+Полученный токен проверяется через официальный `/users/me`, сохраняется в
+системном хранилище zottion и используется его REST-клиентом. Общая OAuth
+connection, наш домен и инфраструктура не нужны. `ntn` — отдельная зависимость
+только для входа; данные страниц через него не проходят. Для CI и ограниченных
+connections остаётся API-токен через stdin или NOTION_TOKEN.
+
+Дополнительный `zottion-auth-service` сохранён для владельцев своей public
+connection: явно выбранный сервер обменивает коды/refresh tokens и хранит
+одноразовые сеансы в памяти. Он не является условием использования zottion.
+Открытый файл ни в одном способе не подменяет системное хранилище.
 
 `Cargo.lock` закрепляет зависимости; `rust-toolchain.toml` — Rust 1.91.0.
 Ratatui 0.30, Crossterm 0.29, EdTUI 0.11.7. CI: fmt, Clippy, тесты и release.
 Публикация архива и production-развёртывание выполняются отдельным действием.
 
-[Схема контейнеров](docs/architecture/diagrams/c4-l2-zottion.md) ·
+[Дополнительный self-hosted вариант](docs/architecture/diagrams/c4-l2-zottion.md) ·
 [Проверенные границы API](docs/architecture/research/2026-10-29-notion-api.md) ·
 [Отчёт проверки](docs/verification.md).
+
+## Принятые решения
+
+- [ADR-0001: браузерный вход через официальный Notion CLI](docs/architecture/decisions/0001-use-notion-cli-for-browser-login.md) — Accepted; вход без нашей инфраструктуры, прямой REST после авторизации.
